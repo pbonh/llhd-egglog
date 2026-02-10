@@ -169,6 +169,8 @@ impl UnitEGraph {
                     Opcode::Alias => self.mk_alias(inst_id, ty_id, arg),
                     Opcode::Not => self.mk_unary(self.schema.dfg_not, inst_id, ty_id, arg),
                     Opcode::Neg => self.mk_unary(self.schema.dfg_neg, inst_id, ty_id, arg),
+                    Opcode::Sig => self.mk_unary(self.schema.dfg_sig, inst_id, ty_id, arg),
+                    Opcode::Prb => self.mk_unary(self.schema.dfg_prb, inst_id, ty_id, arg),
                     _ => self.mk_value_ref(unit, unit.inst_result(inst))?,
                 }
             }
@@ -510,6 +512,8 @@ pub fn is_pure_opcode(opcode: Opcode) -> bool {
             | Opcode::Shl
             | Opcode::Shr
             | Opcode::Mux
+            | Opcode::Sig
+            | Opcode::Prb
             | Opcode::InsField
             | Opcode::InsSlice
             | Opcode::ExtField

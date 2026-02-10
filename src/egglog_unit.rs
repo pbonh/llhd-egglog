@@ -1,13 +1,13 @@
 use crate::{
-    CfgSkeleton, EClassRef, UnitEGraph, CFG_SK_BLOCK, CFG_SK_BLOCK_ARG, CFG_SK_EFFECT,
-    CFG_SK_TERM_BR, CFG_SK_TERM_BR_COND, CFG_SK_TERM_HALT, CFG_SK_TERM_RET, CFG_SK_TERM_RET_VALUE,
-    CFG_SK_TERM_WAIT, CFG_SK_TERM_WAIT_TIME,
+    is_pure_opcode, CfgSkeleton, EClassRef, UnitEGraph, CFG_SK_BLOCK, CFG_SK_BLOCK_ARG,
+    CFG_SK_EFFECT, CFG_SK_TERM_BR, CFG_SK_TERM_BR_COND, CFG_SK_TERM_HALT, CFG_SK_TERM_RET,
+    CFG_SK_TERM_RET_VALUE, CFG_SK_TERM_WAIT, CFG_SK_TERM_WAIT_TIME,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use egglog_numeric_id::NumericId;
 use llhd::ir::{
-    Block, ExtUnit, InstData, Opcode, RegMode, Signature, Unit, UnitBuilder, UnitData, UnitKind,
-    UnitName, Value,
+    Block, ExtUnit, Inst, InstData, Opcode, RegMode, Signature, Unit, UnitBuilder, UnitData,
+    UnitKind, UnitName, Value, ValueData,
 };
 use llhd::table::TableKey;
 use llhd::ty::{
@@ -270,148 +270,165 @@ pub fn unit_to_egglog_program(unit: &Unit<'_>) -> Result<String> {
         }
     }
 
-    let mut egraph = UnitEGraph::build_from_unit(unit)?;
-    let skeleton = CfgSkeleton::build_from_unit(unit, &mut egraph)?;
-    for block in &skeleton.blocks {
+    if unit.is_entity() {
         lines.push(format_term(&Term::List(vec![
             Term::Atom(CFG_SK_BLOCK.into()),
-            Term::Atom(block.block.index().to_string()),
+            Term::Atom("0".into()),
         ])));
-        for arg in &block.args {
+    } else {
+        let mut egraph = UnitEGraph::build_from_unit(unit)?;
+        let skeleton = CfgSkeleton::build_from_unit(unit, &mut egraph)?;
+        for block in &skeleton.blocks {
             lines.push(format_term(&Term::List(vec![
-                Term::Atom(CFG_SK_BLOCK_ARG.into()),
+                Term::Atom(CFG_SK_BLOCK.into()),
                 Term::Atom(block.block.index().to_string()),
-                Term::Atom(arg.value.index().to_string()),
-                Term::Atom(eclass_id(arg.class).to_string()),
             ])));
-        }
-        for stmt in &block.stmts {
-            match stmt {
-                crate::cfg_skeleton::SkeletonStmt::Effect {
-                    inst,
-                    opcode,
-                    args,
-                    result,
-                } => {
-                    let arg_list = values_list(
-                        args.iter()
-                            .map(|arg| Term::Atom(eclass_id(*arg).to_string()))
-                            .collect(),
-                    );
-                    let result = result
-                        .map(|value| Term::Atom(eclass_id(value).to_string()))
-                        .unwrap_or_else(|| Term::Atom("none".into()));
-                    lines.push(format_term(&Term::List(vec![
-                        Term::Atom(CFG_SK_EFFECT.into()),
-                        Term::Atom(block.block.index().to_string()),
-                        Term::Atom(inst.index().to_string()),
-                        Term::Atom(opcode_atom(*opcode).to_string()),
+            for arg in &block.args {
+                lines.push(format_term(&Term::List(vec![
+                    Term::Atom(CFG_SK_BLOCK_ARG.into()),
+                    Term::Atom(block.block.index().to_string()),
+                    Term::Atom(arg.value.index().to_string()),
+                    Term::Atom(eclass_id(arg.class).to_string()),
+                ])));
+            }
+            for stmt in &block.stmts {
+                match stmt {
+                    crate::cfg_skeleton::SkeletonStmt::Effect {
+                        inst,
+                        opcode,
+                        args,
                         result,
-                        arg_list,
-                    ])));
+                    } => {
+                        let arg_list = values_list(
+                            args.iter()
+                                .map(|arg| Term::Atom(eclass_id(*arg).to_string()))
+                                .collect(),
+                        );
+                        let result = result
+                            .map(|value| Term::Atom(eclass_id(value).to_string()))
+                            .unwrap_or_else(|| Term::Atom("none".into()));
+                        lines.push(format_term(&Term::List(vec![
+                            Term::Atom(CFG_SK_EFFECT.into()),
+                            Term::Atom(block.block.index().to_string()),
+                            Term::Atom(inst.index().to_string()),
+                            Term::Atom(opcode_atom(*opcode).to_string()),
+                            result,
+                            arg_list,
+                        ])));
+                    }
+                }
+            }
+            if let Some(term) = &block.terminator {
+                match term {
+                    crate::cfg_skeleton::SkeletonTerminator::Br { inst, target, args } => {
+                        lines.push(format_term(&Term::List(vec![
+                            Term::Atom(CFG_SK_TERM_BR.into()),
+                            Term::Atom(block.block.index().to_string()),
+                            Term::Atom(inst.index().to_string()),
+                            Term::Atom(target.index().to_string()),
+                            values_list(
+                                args.iter()
+                                    .map(|arg| Term::Atom(eclass_id(*arg).to_string()))
+                                    .collect(),
+                            ),
+                        ])));
+                    }
+                    crate::cfg_skeleton::SkeletonTerminator::BrCond {
+                        inst,
+                        cond,
+                        then_target,
+                        then_args,
+                        else_target,
+                        else_args,
+                    } => {
+                        lines.push(format_term(&Term::List(vec![
+                            Term::Atom(CFG_SK_TERM_BR_COND.into()),
+                            Term::Atom(block.block.index().to_string()),
+                            Term::Atom(inst.index().to_string()),
+                            Term::Atom(eclass_id(*cond).to_string()),
+                            Term::Atom(then_target.index().to_string()),
+                            values_list(
+                                then_args
+                                    .iter()
+                                    .map(|arg| Term::Atom(eclass_id(*arg).to_string()))
+                                    .collect(),
+                            ),
+                            Term::Atom(else_target.index().to_string()),
+                            values_list(
+                                else_args
+                                    .iter()
+                                    .map(|arg| Term::Atom(eclass_id(*arg).to_string()))
+                                    .collect(),
+                            ),
+                        ])));
+                    }
+                    crate::cfg_skeleton::SkeletonTerminator::Wait { inst, target, args } => {
+                        lines.push(format_term(&Term::List(vec![
+                            Term::Atom(CFG_SK_TERM_WAIT.into()),
+                            Term::Atom(block.block.index().to_string()),
+                            Term::Atom(inst.index().to_string()),
+                            Term::Atom(target.index().to_string()),
+                            values_list(
+                                args.iter()
+                                    .map(|arg| Term::Atom(eclass_id(*arg).to_string()))
+                                    .collect(),
+                            ),
+                        ])));
+                    }
+                    crate::cfg_skeleton::SkeletonTerminator::WaitTime {
+                        inst,
+                        time,
+                        target,
+                        args,
+                    } => {
+                        lines.push(format_term(&Term::List(vec![
+                            Term::Atom(CFG_SK_TERM_WAIT_TIME.into()),
+                            Term::Atom(block.block.index().to_string()),
+                            Term::Atom(inst.index().to_string()),
+                            Term::Atom(eclass_id(*time).to_string()),
+                            Term::Atom(target.index().to_string()),
+                            values_list(
+                                args.iter()
+                                    .map(|arg| Term::Atom(eclass_id(*arg).to_string()))
+                                    .collect(),
+                            ),
+                        ])));
+                    }
+                    crate::cfg_skeleton::SkeletonTerminator::Ret { inst } => {
+                        lines.push(format_term(&Term::List(vec![
+                            Term::Atom(CFG_SK_TERM_RET.into()),
+                            Term::Atom(block.block.index().to_string()),
+                            Term::Atom(inst.index().to_string()),
+                        ])));
+                    }
+                    crate::cfg_skeleton::SkeletonTerminator::RetValue { inst, value } => {
+                        lines.push(format_term(&Term::List(vec![
+                            Term::Atom(CFG_SK_TERM_RET_VALUE.into()),
+                            Term::Atom(block.block.index().to_string()),
+                            Term::Atom(inst.index().to_string()),
+                            Term::Atom(eclass_id(*value).to_string()),
+                        ])));
+                    }
+                    crate::cfg_skeleton::SkeletonTerminator::Halt { inst } => {
+                        lines.push(format_term(&Term::List(vec![
+                            Term::Atom(CFG_SK_TERM_HALT.into()),
+                            Term::Atom(block.block.index().to_string()),
+                            Term::Atom(inst.index().to_string()),
+                        ])));
+                    }
                 }
             }
         }
-        if let Some(term) = &block.terminator {
-            match term {
-                crate::cfg_skeleton::SkeletonTerminator::Br { inst, target, args } => {
-                    lines.push(format_term(&Term::List(vec![
-                        Term::Atom(CFG_SK_TERM_BR.into()),
-                        Term::Atom(block.block.index().to_string()),
-                        Term::Atom(inst.index().to_string()),
-                        Term::Atom(target.index().to_string()),
-                        values_list(
-                            args.iter()
-                                .map(|arg| Term::Atom(eclass_id(*arg).to_string()))
-                                .collect(),
-                        ),
-                    ])));
-                }
-                crate::cfg_skeleton::SkeletonTerminator::BrCond {
-                    inst,
-                    cond,
-                    then_target,
-                    then_args,
-                    else_target,
-                    else_args,
-                } => {
-                    lines.push(format_term(&Term::List(vec![
-                        Term::Atom(CFG_SK_TERM_BR_COND.into()),
-                        Term::Atom(block.block.index().to_string()),
-                        Term::Atom(inst.index().to_string()),
-                        Term::Atom(eclass_id(*cond).to_string()),
-                        Term::Atom(then_target.index().to_string()),
-                        values_list(
-                            then_args
-                                .iter()
-                                .map(|arg| Term::Atom(eclass_id(*arg).to_string()))
-                                .collect(),
-                        ),
-                        Term::Atom(else_target.index().to_string()),
-                        values_list(
-                            else_args
-                                .iter()
-                                .map(|arg| Term::Atom(eclass_id(*arg).to_string()))
-                                .collect(),
-                        ),
-                    ])));
-                }
-                crate::cfg_skeleton::SkeletonTerminator::Wait { inst, target, args } => {
-                    lines.push(format_term(&Term::List(vec![
-                        Term::Atom(CFG_SK_TERM_WAIT.into()),
-                        Term::Atom(block.block.index().to_string()),
-                        Term::Atom(inst.index().to_string()),
-                        Term::Atom(target.index().to_string()),
-                        values_list(
-                            args.iter()
-                                .map(|arg| Term::Atom(eclass_id(*arg).to_string()))
-                                .collect(),
-                        ),
-                    ])));
-                }
-                crate::cfg_skeleton::SkeletonTerminator::WaitTime {
-                    inst,
-                    time,
-                    target,
-                    args,
-                } => {
-                    lines.push(format_term(&Term::List(vec![
-                        Term::Atom(CFG_SK_TERM_WAIT_TIME.into()),
-                        Term::Atom(block.block.index().to_string()),
-                        Term::Atom(inst.index().to_string()),
-                        Term::Atom(eclass_id(*time).to_string()),
-                        Term::Atom(target.index().to_string()),
-                        values_list(
-                            args.iter()
-                                .map(|arg| Term::Atom(eclass_id(*arg).to_string()))
-                                .collect(),
-                        ),
-                    ])));
-                }
-                crate::cfg_skeleton::SkeletonTerminator::Ret { inst } => {
-                    lines.push(format_term(&Term::List(vec![
-                        Term::Atom(CFG_SK_TERM_RET.into()),
-                        Term::Atom(block.block.index().to_string()),
-                        Term::Atom(inst.index().to_string()),
-                    ])));
-                }
-                crate::cfg_skeleton::SkeletonTerminator::RetValue { inst, value } => {
-                    lines.push(format_term(&Term::List(vec![
-                        Term::Atom(CFG_SK_TERM_RET_VALUE.into()),
-                        Term::Atom(block.block.index().to_string()),
-                        Term::Atom(inst.index().to_string()),
-                        Term::Atom(eclass_id(*value).to_string()),
-                    ])));
-                }
-                crate::cfg_skeleton::SkeletonTerminator::Halt { inst } => {
-                    lines.push(format_term(&Term::List(vec![
-                        Term::Atom(CFG_SK_TERM_HALT.into()),
-                        Term::Atom(block.block.index().to_string()),
-                        Term::Atom(inst.index().to_string()),
-                    ])));
-                }
-            }
-        }
+    }
+
+    let mut cache = HashMap::new();
+    let roots = collect_pure_roots(unit);
+    for value in roots {
+        let term = pure_dfg_term_for_value(unit, value, &mut cache)?;
+        lines.push(format_term(&Term::List(vec![
+            Term::Atom("RootDFG".into()),
+            term,
+        ])));
     }
 
     Ok(lines.join("\n"))
@@ -589,6 +606,241 @@ pub fn unit_from_egglog_program(program: &str) -> Result<UnitData> {
 
     let _ = builder.finish();
     Ok(data)
+}
+
+fn pure_dfg_term_for_value(
+    unit: &Unit<'_>,
+    value: Value,
+    cache: &mut HashMap<Value, Term>,
+) -> Result<Term> {
+    if value.is_invalid() {
+        return Ok(value_ref_term(value));
+    }
+    if let Some(term) = cache.get(&value) {
+        return Ok(term.clone());
+    }
+
+    let term = match &unit[value] {
+        ValueData::Inst { inst, .. } => {
+            let data = &unit[*inst];
+            if is_pure_opcode(data.opcode()) {
+                pure_dfg_term_for_inst(unit, *inst, data, cache)?
+            } else {
+                value_ref_term(value)
+            }
+        }
+        _ => value_ref_term(value),
+    };
+
+    cache.insert(value, term.clone());
+    Ok(term)
+}
+
+fn pure_dfg_term_for_inst(
+    unit: &Unit<'_>,
+    inst: Inst,
+    data: &InstData,
+    cache: &mut HashMap<Value, Term>,
+) -> Result<Term> {
+    let opcode = data.opcode();
+    let term = match data {
+        InstData::ConstInt { imm, .. } => {
+            op_term("ConstInt", vec![Term::Str(imm.value.to_string())])
+        }
+        InstData::ConstTime { imm, .. } => op_term("ConstTime", vec![Term::Str(imm.to_string())]),
+        InstData::Array { args, imms, .. } if opcode == Opcode::ArrayUniform => {
+            let len = imms.get(0).copied().unwrap_or(0);
+            let arg = args.get(0).copied().unwrap_or_else(Value::invalid);
+            let arg = pure_dfg_term_for_value(unit, arg, cache)?;
+            op_term("ArrayUniform", vec![Term::Atom(len.to_string()), arg])
+        }
+        InstData::Aggregate { args, .. } if opcode == Opcode::Array => {
+            let elems = pure_dfg_terms_for_values(unit, args, cache)?;
+            op_term("Array", vec![Term::List(elems)])
+        }
+        InstData::Aggregate { args, .. } if opcode == Opcode::Struct => {
+            let elems = pure_dfg_terms_for_values(unit, args, cache)?;
+            op_term("Struct", vec![Term::List(elems)])
+        }
+        InstData::Unary { args, .. } => {
+            let arg = args.get(0).copied().unwrap_or_else(Value::invalid);
+            let arg = pure_dfg_term_for_value(unit, arg, cache)?;
+            match opcode {
+                Opcode::Alias => op_term("Alias", vec![arg]),
+                Opcode::Not => op_term("Not", vec![arg]),
+                Opcode::Neg => op_term("Neg", vec![arg]),
+                Opcode::Sig => op_term("Sig", vec![arg]),
+                Opcode::Prb => op_term("Prb", vec![arg]),
+                _ => value_ref_term_for_inst(unit, inst),
+            }
+        }
+        InstData::Binary { args, .. } => {
+            let lhs = args.get(0).copied().unwrap_or_else(Value::invalid);
+            let rhs = args.get(1).copied().unwrap_or_else(Value::invalid);
+            let lhs = pure_dfg_term_for_value(unit, lhs, cache)?;
+            let rhs = pure_dfg_term_for_value(unit, rhs, cache)?;
+            match opcode {
+                Opcode::Add => op_term("Add", vec![lhs, rhs]),
+                Opcode::Sub => op_term("Sub", vec![lhs, rhs]),
+                Opcode::And => op_term("And", vec![lhs, rhs]),
+                Opcode::Or => op_term("Or", vec![lhs, rhs]),
+                Opcode::Xor => op_term("Xor", vec![lhs, rhs]),
+                Opcode::Smul => op_term("Smul", vec![lhs, rhs]),
+                Opcode::Sdiv => op_term("Sdiv", vec![lhs, rhs]),
+                Opcode::Smod => op_term("Smod", vec![lhs, rhs]),
+                Opcode::Srem => op_term("Srem", vec![lhs, rhs]),
+                Opcode::Umul => op_term("Umul", vec![lhs, rhs]),
+                Opcode::Udiv => op_term("Udiv", vec![lhs, rhs]),
+                Opcode::Umod => op_term("Umod", vec![lhs, rhs]),
+                Opcode::Urem => op_term("Urem", vec![lhs, rhs]),
+                Opcode::Eq => op_term("Eq", vec![lhs, rhs]),
+                Opcode::Neq => op_term("Neq", vec![lhs, rhs]),
+                Opcode::Slt => op_term("Slt", vec![lhs, rhs]),
+                Opcode::Sgt => op_term("Sgt", vec![lhs, rhs]),
+                Opcode::Sle => op_term("Sle", vec![lhs, rhs]),
+                Opcode::Sge => op_term("Sge", vec![lhs, rhs]),
+                Opcode::Ult => op_term("Ult", vec![lhs, rhs]),
+                Opcode::Ugt => op_term("Ugt", vec![lhs, rhs]),
+                Opcode::Ule => op_term("Ule", vec![lhs, rhs]),
+                Opcode::Uge => op_term("Uge", vec![lhs, rhs]),
+                Opcode::Mux => op_term("Mux", vec![lhs, rhs]),
+                _ => value_ref_term_for_inst(unit, inst),
+            }
+        }
+        InstData::Ternary { args, .. } => {
+            let a = args.get(0).copied().unwrap_or_else(Value::invalid);
+            let b = args.get(1).copied().unwrap_or_else(Value::invalid);
+            let c = args.get(2).copied().unwrap_or_else(Value::invalid);
+            let a = pure_dfg_term_for_value(unit, a, cache)?;
+            let b = pure_dfg_term_for_value(unit, b, cache)?;
+            let c = pure_dfg_term_for_value(unit, c, cache)?;
+            match opcode {
+                Opcode::Shl => op_term("Shl", vec![a, b, c]),
+                Opcode::Shr => op_term("Shr", vec![a, b, c]),
+                _ => value_ref_term_for_inst(unit, inst),
+            }
+        }
+        InstData::InsExt { args, imms, .. }
+            if opcode == Opcode::InsField
+                || opcode == Opcode::InsSlice
+                || opcode == Opcode::ExtField
+                || opcode == Opcode::ExtSlice =>
+        {
+            let a = args.get(0).copied().unwrap_or_else(Value::invalid);
+            let b = args.get(1).copied().unwrap_or_else(Value::invalid);
+            let a = pure_dfg_term_for_value(unit, a, cache)?;
+            let b = pure_dfg_term_for_value(unit, b, cache)?;
+            let imm0 = imms.get(0).copied().unwrap_or(0);
+            let imm1 = imms.get(1).copied().unwrap_or(0);
+            match opcode {
+                Opcode::InsField => op_term(
+                    "InsField",
+                    vec![
+                        a,
+                        b,
+                        Term::Atom(imm0.to_string()),
+                        Term::Atom(imm1.to_string()),
+                    ],
+                ),
+                Opcode::InsSlice => op_term(
+                    "InsSlice",
+                    vec![
+                        a,
+                        b,
+                        Term::Atom(imm0.to_string()),
+                        Term::Atom(imm1.to_string()),
+                    ],
+                ),
+                Opcode::ExtField => op_term(
+                    "ExtField",
+                    vec![
+                        a,
+                        b,
+                        Term::Atom(imm0.to_string()),
+                        Term::Atom(imm1.to_string()),
+                    ],
+                ),
+                Opcode::ExtSlice => op_term(
+                    "ExtSlice",
+                    vec![
+                        a,
+                        b,
+                        Term::Atom(imm0.to_string()),
+                        Term::Atom(imm1.to_string()),
+                    ],
+                ),
+                _ => value_ref_term_for_inst(unit, inst),
+            }
+        }
+        _ => value_ref_term_for_inst(unit, inst),
+    };
+
+    Ok(term)
+}
+
+fn pure_dfg_terms_for_values(
+    unit: &Unit<'_>,
+    values: &[Value],
+    cache: &mut HashMap<Value, Term>,
+) -> Result<Vec<Term>> {
+    values
+        .iter()
+        .map(|&value| pure_dfg_term_for_value(unit, value, cache))
+        .collect()
+}
+
+fn value_ref_term(value: Value) -> Term {
+    if value.is_invalid() {
+        op_term("ValueRef", vec![Term::Atom("-1".into())])
+    } else {
+        op_term("ValueRef", vec![Term::Atom(value.index().to_string())])
+    }
+}
+
+fn value_ref_term_for_inst(unit: &Unit<'_>, inst: Inst) -> Term {
+    match unit.get_inst_result(inst) {
+        Some(value) => value_ref_term(value),
+        None => value_ref_term(Value::invalid()),
+    }
+}
+
+fn op_term(name: &str, mut args: Vec<Term>) -> Term {
+    let mut items = Vec::with_capacity(args.len() + 1);
+    items.push(Term::Atom(name.into()));
+    items.append(&mut args);
+    Term::List(items)
+}
+
+fn collect_pure_roots(unit: &Unit<'_>) -> Vec<Value> {
+    let mut roots = Vec::new();
+    let mut seen = HashMap::new();
+
+    if unit.is_entity() {
+        for value in unit.output_args() {
+            if seen.insert(value, ()).is_none() {
+                roots.push(value);
+            }
+        }
+        return roots;
+    }
+
+    for inst in unit.all_insts() {
+        let opcode = unit[inst].opcode();
+        if is_pure_opcode(opcode) {
+            continue;
+        }
+        for &arg in unit[inst].args() {
+            if arg.is_invalid() {
+                continue;
+            }
+            if seen.insert(arg, ()).is_none() {
+                roots.push(arg);
+            }
+        }
+    }
+
+    roots.sort_by_key(|value| value.index());
+    roots
 }
 
 fn build_inst_data(
@@ -873,6 +1125,9 @@ fn parse_program(program: &str) -> Result<ParsedProgram> {
             | CFG_SK_TERM_RET_VALUE
             | CFG_SK_TERM_HALT => {
                 // Skeleton entries are parsed but not required for reconstruction.
+            }
+            "RootDFG" => {
+                // Pure DFG roots are ignored during reconstruction.
             }
             other => bail!("unknown term {}", other),
         }
