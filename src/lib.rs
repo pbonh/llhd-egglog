@@ -13,7 +13,10 @@ pub use crate::egglog_schema::{
     CFG_SK_EFFECT, CFG_SK_TERM_BR, CFG_SK_TERM_BR_COND, CFG_SK_TERM_HALT, CFG_SK_TERM_RET,
     CFG_SK_TERM_RET_VALUE, CFG_SK_TERM_WAIT, CFG_SK_TERM_WAIT_TIME,
 };
-pub use crate::egglog_unit::{unit_from_egglog_program, unit_to_egglog_program};
+pub use crate::egglog_unit::{
+    unit_from_egglog_commands, unit_from_egglog_program, unit_to_egglog_commands,
+    unit_to_egglog_program,
+};
 pub use crate::egraph::{is_pure_opcode, EClassRef, UnitEGraph};
 
 #[cfg(feature = "egglog-debug")]

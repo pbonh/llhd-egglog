@@ -4,6 +4,7 @@ use crate::{
     CFG_SK_TERM_RET_VALUE, CFG_SK_TERM_WAIT, CFG_SK_TERM_WAIT_TIME,
 };
 use anyhow::{anyhow, bail, Context, Result};
+use egglog::ast::{Action, Command, Expr, Literal, Parser, RustSpan, Span};
 use egglog_numeric_id::NumericId;
 use llhd::ir::{
     Block, ExtUnit, Inst, InstData, Opcode, RegMode, Signature, Unit, UnitBuilder, UnitData,
@@ -17,13 +18,6 @@ use llhd::ty::{
 use llhd::value::{IntValue, TimeValue};
 use num::{BigInt, BigRational, BigUint, Zero};
 use std::collections::HashMap;
-
-#[derive(Debug, Clone)]
-enum Term {
-    Atom(String),
-    Str(String),
-    List(Vec<Term>),
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ArgDir {
@@ -102,9 +96,9 @@ struct ParsedProgram {
     reg_modes: HashMap<usize, Vec<RegMode>>,
 }
 
-/// Serialize a unit into an egglog-style program.
-pub fn unit_to_egglog_program(unit: &Unit<'_>) -> Result<String> {
-    let mut lines = Vec::new();
+/// Serialize a unit into egglog commands.
+pub fn unit_to_egglog_commands(unit: &Unit<'_>) -> Result<Vec<Command>> {
+    let mut commands = Vec::new();
     let (name_tag, name_val) = unit_name_terms(unit.name());
     let inputs = types_list(
         unit.sig()
@@ -122,33 +116,39 @@ pub fn unit_to_egglog_program(unit: &Unit<'_>) -> Result<String> {
         .sig()
         .has_return_type()
         .then(|| type_term(&unit.sig().return_type()))
-        .unwrap_or_else(|| Term::Atom("None".into()));
-    let kind = Term::Atom(unit_kind_atom(unit.kind()).to_string());
-    lines.push(format_term(&Term::List(vec![
-        Term::Atom("Unit".into()),
-        kind,
-        name_tag,
-        name_val,
-        inputs.clone(),
-        outputs.clone(),
-        ret.clone(),
-    ])));
+        .unwrap_or_else(|| expr_atom("None"));
+    let kind = expr_atom(unit_kind_atom(unit.kind()));
+    commands.push(expr_command(expr_call(
+        "Unit",
+        vec![
+            kind,
+            name_tag,
+            name_val,
+            inputs.clone(),
+            outputs.clone(),
+            ret.clone(),
+        ],
+    )));
 
     for (index, value) in unit.input_args().enumerate() {
-        lines.push(format_term(&Term::List(vec![
-            Term::Atom("ArgValue".into()),
-            Term::Atom("input".into()),
-            Term::Atom(index.to_string()),
-            Term::Atom(value.index().to_string()),
-        ])));
+        commands.push(expr_command(expr_call(
+            "ArgValue",
+            vec![
+                expr_atom("input"),
+                expr_usize(index)?,
+                expr_usize(value.index())?,
+            ],
+        )));
     }
     for (index, value) in unit.output_args().enumerate() {
-        lines.push(format_term(&Term::List(vec![
-            Term::Atom("ArgValue".into()),
-            Term::Atom("output".into()),
-            Term::Atom(index.to_string()),
-            Term::Atom(value.index().to_string()),
-        ])));
+        commands.push(expr_command(expr_call(
+            "ArgValue",
+            vec![
+                expr_atom("output"),
+                expr_usize(index)?,
+                expr_usize(value.index())?,
+            ],
+        )));
     }
 
     for (ext, data) in unit.extern_units() {
@@ -169,127 +169,140 @@ pub fn unit_to_egglog_program(unit: &Unit<'_>) -> Result<String> {
             .sig
             .has_return_type()
             .then(|| type_term(&data.sig.return_type()))
-            .unwrap_or_else(|| Term::Atom("None".into()));
-        lines.push(format_term(&Term::List(vec![
-            Term::Atom("ExtUnit".into()),
-            Term::Atom(ext.index().to_string()),
-            ext_tag,
-            ext_name,
-            ext_inputs,
-            ext_outputs,
-            ext_ret,
-        ])));
+            .unwrap_or_else(|| expr_atom("None"));
+        commands.push(expr_command(expr_call(
+            "ExtUnit",
+            vec![
+                expr_usize(ext.index())?,
+                ext_tag,
+                ext_name,
+                ext_inputs,
+                ext_outputs,
+                ext_ret,
+            ],
+        )));
     }
 
     let block_ids: Vec<_> = unit.blocks().map(|bb| bb.index()).collect();
-    let mut block_order = vec![Term::Atom("BlockOrder".into())];
-    block_order.extend(block_ids.iter().map(|id| Term::Atom(id.to_string())));
-    lines.push(format_term(&Term::List(block_order)));
+    let block_order = expr_list(
+        block_ids
+            .iter()
+            .map(|id| expr_usize(*id))
+            .collect::<Result<Vec<_>>>()?,
+    );
+    commands.push(expr_command(expr_call("BlockOrder", vec![block_order])));
 
     for bb in unit.blocks() {
         for inst in unit.insts(bb) {
             let data = &unit[inst];
-            let opcode = Term::Atom(opcode_atom(data.opcode()).to_string());
+            let opcode = expr_atom(opcode_atom(data.opcode()));
             let result = unit
                 .get_inst_result(inst)
-                .map(|value| Term::Atom(value.index().to_string()))
-                .unwrap_or_else(|| Term::Atom("none".into()));
+                .map(|value| expr_usize(value.index()))
+                .transpose()?
+                .unwrap_or_else(|| expr_atom("none"));
             let ty = type_term(&unit.inst_type(inst));
             let args = values_list(
                 data.args()
                     .iter()
                     .map(|arg| parsed_value_term(*arg))
-                    .collect(),
+                    .collect::<Result<Vec<_>>>()?,
             );
             let blocks = values_list(
                 data.blocks()
                     .iter()
-                    .map(|bb| Term::Atom(bb.index().to_string()))
-                    .collect(),
+                    .map(|bb| expr_usize(bb.index()))
+                    .collect::<Result<Vec<_>>>()?,
             );
             let imms = values_list(
                 data.imms()
                     .iter()
-                    .map(|imm| Term::Atom(imm.to_string()))
-                    .collect(),
+                    .map(|imm| expr_usize(*imm))
+                    .collect::<Result<Vec<_>>>()?,
             );
-            lines.push(format_term(&Term::List(vec![
-                Term::Atom("Inst".into()),
-                Term::Atom(inst.index().to_string()),
-                Term::Atom(bb.index().to_string()),
-                opcode,
-                result,
-                ty,
-                args,
-                blocks,
-                imms,
-            ])));
+            commands.push(expr_command(expr_call(
+                "Inst",
+                vec![
+                    expr_usize(inst.index())?,
+                    expr_usize(bb.index())?,
+                    opcode,
+                    result,
+                    ty,
+                    args,
+                    blocks,
+                    imms,
+                ],
+            )));
 
             if let Some(imm) = data.get_const_int() {
-                lines.push(format_term(&Term::List(vec![
-                    Term::Atom("ConstInt".into()),
-                    Term::Atom(inst.index().to_string()),
-                    Term::Atom(imm.width.to_string()),
-                    Term::Str(imm.value.to_string()),
-                ])));
+                commands.push(expr_command(expr_call(
+                    "ConstInt",
+                    vec![
+                        expr_usize(inst.index())?,
+                        expr_usize(imm.width)?,
+                        expr_string(imm.value.to_string()),
+                    ],
+                )));
             }
             if let Some(imm) = data.get_const_time() {
                 let num = imm.time.numer().clone();
                 let den = imm.time.denom().clone();
-                lines.push(format_term(&Term::List(vec![
-                    Term::Atom("ConstTime".into()),
-                    Term::Atom(inst.index().to_string()),
-                    Term::Str(num.to_string()),
-                    Term::Str(den.to_string()),
-                    Term::Atom(imm.delta.to_string()),
-                    Term::Atom(imm.epsilon.to_string()),
-                ])));
+                commands.push(expr_command(expr_call(
+                    "ConstTime",
+                    vec![
+                        expr_usize(inst.index())?,
+                        expr_string(num.to_string()),
+                        expr_string(den.to_string()),
+                        expr_usize(imm.delta)?,
+                        expr_usize(imm.epsilon)?,
+                    ],
+                )));
             }
             if let Some(ext) = data.get_ext_unit() {
                 if matches!(data.opcode(), Opcode::Call | Opcode::Inst) {
                     let ins = data.input_args().len() as u16;
-                    lines.push(format_term(&Term::List(vec![
-                        Term::Atom("CallInfo".into()),
-                        Term::Atom(inst.index().to_string()),
-                        Term::Atom(ext.index().to_string()),
-                        Term::Atom(ins.to_string()),
-                    ])));
+                    commands.push(expr_command(expr_call(
+                        "CallInfo",
+                        vec![
+                            expr_usize(inst.index())?,
+                            expr_usize(ext.index())?,
+                            expr_usize(ins as usize)?,
+                        ],
+                    )));
                 }
             }
             if data.opcode() == Opcode::Reg {
                 let modes: Vec<_> = data
                     .mode_args()
-                    .map(|mode| Term::Atom(reg_mode_atom(mode)))
+                    .map(|mode| expr_atom(reg_mode_atom(mode)))
                     .collect();
-                lines.push(format_term(&Term::List(vec![
-                    Term::Atom("RegModes".into()),
-                    Term::Atom(inst.index().to_string()),
-                    Term::List(modes),
-                ])));
+                commands.push(expr_command(expr_call(
+                    "RegModes",
+                    vec![expr_usize(inst.index())?, expr_list(modes)],
+                )));
             }
         }
     }
 
     if unit.is_entity() {
-        lines.push(format_term(&Term::List(vec![
-            Term::Atom(CFG_SK_BLOCK.into()),
-            Term::Atom("0".into()),
-        ])));
+        commands.push(expr_command(expr_call(CFG_SK_BLOCK, vec![expr_usize(0)?])));
     } else {
         let mut egraph = UnitEGraph::build_from_unit(unit)?;
         let skeleton = CfgSkeleton::build_from_unit(unit, &mut egraph)?;
         for block in &skeleton.blocks {
-            lines.push(format_term(&Term::List(vec![
-                Term::Atom(CFG_SK_BLOCK.into()),
-                Term::Atom(block.block.index().to_string()),
-            ])));
+            commands.push(expr_command(expr_call(
+                CFG_SK_BLOCK,
+                vec![expr_usize(block.block.index())?],
+            )));
             for arg in &block.args {
-                lines.push(format_term(&Term::List(vec![
-                    Term::Atom(CFG_SK_BLOCK_ARG.into()),
-                    Term::Atom(block.block.index().to_string()),
-                    Term::Atom(arg.value.index().to_string()),
-                    Term::Atom(eclass_id(arg.class).to_string()),
-                ])));
+                commands.push(expr_command(expr_call(
+                    CFG_SK_BLOCK_ARG,
+                    vec![
+                        expr_usize(block.block.index())?,
+                        expr_usize(arg.value.index())?,
+                        expr_i64(eclass_id(arg.class) as i64),
+                    ],
+                )));
             }
             for stmt in &block.stmts {
                 match stmt {
@@ -301,37 +314,41 @@ pub fn unit_to_egglog_program(unit: &Unit<'_>) -> Result<String> {
                     } => {
                         let arg_list = values_list(
                             args.iter()
-                                .map(|arg| Term::Atom(eclass_id(*arg).to_string()))
-                                .collect(),
+                                .map(|arg| expr_i64(eclass_id(*arg) as i64))
+                                .collect::<Vec<_>>(),
                         );
                         let result = result
-                            .map(|value| Term::Atom(eclass_id(value).to_string()))
-                            .unwrap_or_else(|| Term::Atom("none".into()));
-                        lines.push(format_term(&Term::List(vec![
-                            Term::Atom(CFG_SK_EFFECT.into()),
-                            Term::Atom(block.block.index().to_string()),
-                            Term::Atom(inst.index().to_string()),
-                            Term::Atom(opcode_atom(*opcode).to_string()),
-                            result,
-                            arg_list,
-                        ])));
+                            .map(|value| expr_i64(eclass_id(value) as i64))
+                            .unwrap_or_else(|| expr_atom("none"));
+                        commands.push(expr_command(expr_call(
+                            CFG_SK_EFFECT,
+                            vec![
+                                expr_usize(block.block.index())?,
+                                expr_usize(inst.index())?,
+                                expr_atom(opcode_atom(*opcode)),
+                                result,
+                                arg_list,
+                            ],
+                        )));
                     }
                 }
             }
             if let Some(term) = &block.terminator {
                 match term {
                     crate::cfg_skeleton::SkeletonTerminator::Br { inst, target, args } => {
-                        lines.push(format_term(&Term::List(vec![
-                            Term::Atom(CFG_SK_TERM_BR.into()),
-                            Term::Atom(block.block.index().to_string()),
-                            Term::Atom(inst.index().to_string()),
-                            Term::Atom(target.index().to_string()),
-                            values_list(
-                                args.iter()
-                                    .map(|arg| Term::Atom(eclass_id(*arg).to_string()))
-                                    .collect(),
-                            ),
-                        ])));
+                        commands.push(expr_command(expr_call(
+                            CFG_SK_TERM_BR,
+                            vec![
+                                expr_usize(block.block.index())?,
+                                expr_usize(inst.index())?,
+                                expr_usize(target.index())?,
+                                values_list(
+                                    args.iter()
+                                        .map(|arg| expr_i64(eclass_id(*arg) as i64))
+                                        .collect::<Vec<_>>(),
+                                ),
+                            ],
+                        )));
                     }
                     crate::cfg_skeleton::SkeletonTerminator::BrCond {
                         inst,
@@ -341,39 +358,43 @@ pub fn unit_to_egglog_program(unit: &Unit<'_>) -> Result<String> {
                         else_target,
                         else_args,
                     } => {
-                        lines.push(format_term(&Term::List(vec![
-                            Term::Atom(CFG_SK_TERM_BR_COND.into()),
-                            Term::Atom(block.block.index().to_string()),
-                            Term::Atom(inst.index().to_string()),
-                            Term::Atom(eclass_id(*cond).to_string()),
-                            Term::Atom(then_target.index().to_string()),
-                            values_list(
-                                then_args
-                                    .iter()
-                                    .map(|arg| Term::Atom(eclass_id(*arg).to_string()))
-                                    .collect(),
-                            ),
-                            Term::Atom(else_target.index().to_string()),
-                            values_list(
-                                else_args
-                                    .iter()
-                                    .map(|arg| Term::Atom(eclass_id(*arg).to_string()))
-                                    .collect(),
-                            ),
-                        ])));
+                        commands.push(expr_command(expr_call(
+                            CFG_SK_TERM_BR_COND,
+                            vec![
+                                expr_usize(block.block.index())?,
+                                expr_usize(inst.index())?,
+                                expr_i64(eclass_id(*cond) as i64),
+                                expr_usize(then_target.index())?,
+                                values_list(
+                                    then_args
+                                        .iter()
+                                        .map(|arg| expr_i64(eclass_id(*arg) as i64))
+                                        .collect::<Vec<_>>(),
+                                ),
+                                expr_usize(else_target.index())?,
+                                values_list(
+                                    else_args
+                                        .iter()
+                                        .map(|arg| expr_i64(eclass_id(*arg) as i64))
+                                        .collect::<Vec<_>>(),
+                                ),
+                            ],
+                        )));
                     }
                     crate::cfg_skeleton::SkeletonTerminator::Wait { inst, target, args } => {
-                        lines.push(format_term(&Term::List(vec![
-                            Term::Atom(CFG_SK_TERM_WAIT.into()),
-                            Term::Atom(block.block.index().to_string()),
-                            Term::Atom(inst.index().to_string()),
-                            Term::Atom(target.index().to_string()),
-                            values_list(
-                                args.iter()
-                                    .map(|arg| Term::Atom(eclass_id(*arg).to_string()))
-                                    .collect(),
-                            ),
-                        ])));
+                        commands.push(expr_command(expr_call(
+                            CFG_SK_TERM_WAIT,
+                            vec![
+                                expr_usize(block.block.index())?,
+                                expr_usize(inst.index())?,
+                                expr_usize(target.index())?,
+                                values_list(
+                                    args.iter()
+                                        .map(|arg| expr_i64(eclass_id(*arg) as i64))
+                                        .collect::<Vec<_>>(),
+                                ),
+                            ],
+                        )));
                     }
                     crate::cfg_skeleton::SkeletonTerminator::WaitTime {
                         inst,
@@ -381,57 +402,61 @@ pub fn unit_to_egglog_program(unit: &Unit<'_>) -> Result<String> {
                         target,
                         args,
                     } => {
-                        lines.push(format_term(&Term::List(vec![
-                            Term::Atom(CFG_SK_TERM_WAIT_TIME.into()),
-                            Term::Atom(block.block.index().to_string()),
-                            Term::Atom(inst.index().to_string()),
-                            Term::Atom(eclass_id(*time).to_string()),
-                            Term::Atom(target.index().to_string()),
-                            values_list(
-                                args.iter()
-                                    .map(|arg| Term::Atom(eclass_id(*arg).to_string()))
-                                    .collect(),
-                            ),
-                        ])));
+                        commands.push(expr_command(expr_call(
+                            CFG_SK_TERM_WAIT_TIME,
+                            vec![
+                                expr_usize(block.block.index())?,
+                                expr_usize(inst.index())?,
+                                expr_i64(eclass_id(*time) as i64),
+                                expr_usize(target.index())?,
+                                values_list(
+                                    args.iter()
+                                        .map(|arg| expr_i64(eclass_id(*arg) as i64))
+                                        .collect::<Vec<_>>(),
+                                ),
+                            ],
+                        )));
                     }
                     crate::cfg_skeleton::SkeletonTerminator::Ret { inst } => {
-                        lines.push(format_term(&Term::List(vec![
-                            Term::Atom(CFG_SK_TERM_RET.into()),
-                            Term::Atom(block.block.index().to_string()),
-                            Term::Atom(inst.index().to_string()),
-                        ])));
+                        commands.push(expr_command(expr_call(
+                            CFG_SK_TERM_RET,
+                            vec![expr_usize(block.block.index())?, expr_usize(inst.index())?],
+                        )));
                     }
                     crate::cfg_skeleton::SkeletonTerminator::RetValue { inst, value } => {
-                        lines.push(format_term(&Term::List(vec![
-                            Term::Atom(CFG_SK_TERM_RET_VALUE.into()),
-                            Term::Atom(block.block.index().to_string()),
-                            Term::Atom(inst.index().to_string()),
-                            Term::Atom(eclass_id(*value).to_string()),
-                        ])));
+                        commands.push(expr_command(expr_call(
+                            CFG_SK_TERM_RET_VALUE,
+                            vec![
+                                expr_usize(block.block.index())?,
+                                expr_usize(inst.index())?,
+                                expr_i64(eclass_id(*value) as i64),
+                            ],
+                        )));
                     }
                     crate::cfg_skeleton::SkeletonTerminator::Halt { inst } => {
-                        lines.push(format_term(&Term::List(vec![
-                            Term::Atom(CFG_SK_TERM_HALT.into()),
-                            Term::Atom(block.block.index().to_string()),
-                            Term::Atom(inst.index().to_string()),
-                        ])));
+                        commands.push(expr_command(expr_call(
+                            CFG_SK_TERM_HALT,
+                            vec![expr_usize(block.block.index())?, expr_usize(inst.index())?],
+                        )));
                     }
                 }
             }
         }
     }
 
-    let mut cache = HashMap::new();
-    let roots = collect_pure_roots(unit);
-    for value in roots {
-        let term = pure_dfg_term_for_value(unit, value, &mut cache)?;
-        lines.push(format_term(&Term::List(vec![
-            Term::Atom("RootDFG".into()),
-            term,
-        ])));
-    }
+    append_pure_dfg_commands(unit, &mut commands)?;
 
-    Ok(lines.join("\n"))
+    Ok(commands)
+}
+
+/// Serialize a unit into an egglog-style program.
+pub fn unit_to_egglog_program(unit: &Unit<'_>) -> Result<String> {
+    let commands = unit_to_egglog_commands(unit)?;
+    Ok(commands
+        .iter()
+        .map(|cmd| cmd.to_string())
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 /// Dump a human-readable egglog program with schema notes.
@@ -474,7 +499,13 @@ pub fn dump_egglog_debug(unit: &Unit<'_>, program: &str) -> String {
 
 /// Deserialize a unit from an egglog-style program.
 pub fn unit_from_egglog_program(program: &str) -> Result<UnitData> {
-    let parsed = parse_program(program)?;
+    let commands = parse_egglog_program(program)?;
+    unit_from_egglog_commands(&commands)
+}
+
+/// Deserialize a unit from egglog commands.
+pub fn unit_from_egglog_commands(commands: &[Command]) -> Result<UnitData> {
+    let parsed = parse_commands(commands)?;
     let unit = parsed.unit.ok_or_else(|| anyhow!("missing Unit entry"))?;
 
     let mut data = UnitData::new(unit.kind, unit.name, unit.sig);
@@ -608,77 +639,149 @@ pub fn unit_from_egglog_program(program: &str) -> Result<UnitData> {
     Ok(data)
 }
 
-fn pure_dfg_term_for_value(
-    unit: &Unit<'_>,
-    value: Value,
-    cache: &mut HashMap<Value, Term>,
-) -> Result<Term> {
-    if value.is_invalid() {
-        return Ok(value_ref_term(value));
-    }
-    if let Some(term) = cache.get(&value) {
-        return Ok(term.clone());
-    }
+fn append_pure_dfg_commands(unit: &Unit<'_>, commands: &mut Vec<Command>) -> Result<()> {
+    let roots = collect_pure_roots(unit);
+    let pure_order = collect_pure_order(unit, &roots);
+    let pure_set: HashMap<Value, ()> = pure_order.iter().map(|value| (*value, ())).collect();
 
-    let term = match &unit[value] {
-        ValueData::Inst { inst, .. } => {
-            let data = &unit[*inst];
-            if is_pure_opcode(data.opcode()) {
-                pure_dfg_term_for_inst(unit, *inst, data, cache)?
-            } else {
-                value_ref_term(value)
-            }
+    for value in &pure_order {
+        let Some(inst) = def_inst(unit, *value) else {
+            continue;
+        };
+        let data = &unit[inst];
+        if !is_pure_opcode(data.opcode()) {
+            continue;
         }
-        _ => value_ref_term(value),
-    };
+        let expr = pure_dfg_expr_for_inst(unit, inst, data, &pure_set)?;
+        let name = pure_value_var(*value);
+        commands.push(Command::Action(Action::Let(egglog::span!(), name, expr)));
+    }
 
-    cache.insert(value, term.clone());
-    Ok(term)
+    for value in roots {
+        let expr = if pure_set.contains_key(&value) {
+            expr_var(&pure_value_var(value))
+        } else {
+            value_ref_expr(value)
+        };
+        commands.push(expr_command(expr_call("RootDFG", vec![expr])));
+    }
+
+    Ok(())
 }
 
-fn pure_dfg_term_for_inst(
+fn collect_pure_order(unit: &Unit<'_>, roots: &[Value]) -> Vec<Value> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Visit {
+        Visiting,
+        Visited,
+    }
+
+    let mut order = Vec::new();
+    let mut state: HashMap<Value, Visit> = HashMap::new();
+
+    for &root in roots {
+        let Some(inst) = def_inst(unit, root) else {
+            continue;
+        };
+        if !is_pure_opcode(unit[inst].opcode()) {
+            continue;
+        }
+
+        let mut stack: Vec<(Value, usize)> = vec![(root, 0)];
+        while let Some((value, idx)) = stack.pop() {
+            if matches!(state.get(&value), Some(Visit::Visited)) {
+                continue;
+            }
+            let Some(inst) = def_inst(unit, value) else {
+                state.insert(value, Visit::Visited);
+                order.push(value);
+                continue;
+            };
+            if !is_pure_opcode(unit[inst].opcode()) {
+                state.insert(value, Visit::Visited);
+                continue;
+            }
+
+            if idx == 0 {
+                if matches!(state.get(&value), Some(Visit::Visiting)) {
+                    state.insert(value, Visit::Visited);
+                    order.push(value);
+                    continue;
+                }
+                state.insert(value, Visit::Visiting);
+            }
+
+            let args = unit[inst].args();
+            if idx < args.len() {
+                stack.push((value, idx + 1));
+                let arg = args[idx];
+                if let Some(arg_inst) = def_inst(unit, arg) {
+                    if is_pure_opcode(unit[arg_inst].opcode()) {
+                        stack.push((arg, 0));
+                    }
+                }
+                continue;
+            }
+
+            state.insert(value, Visit::Visited);
+            order.push(value);
+        }
+    }
+
+    order
+}
+
+fn pure_dfg_expr_for_inst(
     unit: &Unit<'_>,
     inst: Inst,
     data: &InstData,
-    cache: &mut HashMap<Value, Term>,
-) -> Result<Term> {
+    pure_set: &HashMap<Value, ()>,
+) -> Result<Expr> {
     let opcode = data.opcode();
-    let term = match data {
+    let expr = match data {
         InstData::ConstInt { imm, .. } => {
-            op_term("ConstInt", vec![Term::Str(imm.value.to_string())])
+            op_term("ConstInt", vec![expr_string(imm.value.to_string())])
         }
-        InstData::ConstTime { imm, .. } => op_term("ConstTime", vec![Term::Str(imm.to_string())]),
+        InstData::ConstTime { imm, .. } => op_term("ConstTime", vec![expr_string(imm.to_string())]),
         InstData::Array { args, imms, .. } if opcode == Opcode::ArrayUniform => {
             let len = imms.get(0).copied().unwrap_or(0);
             let arg = args.get(0).copied().unwrap_or_else(Value::invalid);
-            let arg = pure_dfg_term_for_value(unit, arg, cache)?;
-            op_term("ArrayUniform", vec![Term::Atom(len.to_string()), arg])
+            op_term(
+                "ArrayUniform",
+                vec![expr_usize(len)?, value_ref_or_var(arg, pure_set)],
+            )
         }
         InstData::Aggregate { args, .. } if opcode == Opcode::Array => {
-            let elems = pure_dfg_terms_for_values(unit, args, cache)?;
-            op_term("Array", vec![Term::List(elems)])
+            let elems = args
+                .iter()
+                .map(|arg| value_ref_or_var(*arg, pure_set))
+                .collect();
+            op_term("Array", vec![expr_list(elems)])
         }
         InstData::Aggregate { args, .. } if opcode == Opcode::Struct => {
-            let elems = pure_dfg_terms_for_values(unit, args, cache)?;
-            op_term("Struct", vec![Term::List(elems)])
+            let elems = args
+                .iter()
+                .map(|arg| value_ref_or_var(*arg, pure_set))
+                .collect();
+            op_term("Struct", vec![expr_list(elems)])
         }
         InstData::Unary { args, .. } => {
             let arg = args.get(0).copied().unwrap_or_else(Value::invalid);
-            let arg = pure_dfg_term_for_value(unit, arg, cache)?;
+            let arg = value_ref_or_var(arg, pure_set);
             match opcode {
                 Opcode::Alias => op_term("Alias", vec![arg]),
                 Opcode::Not => op_term("Not", vec![arg]),
                 Opcode::Neg => op_term("Neg", vec![arg]),
                 Opcode::Sig => op_term("Sig", vec![arg]),
                 Opcode::Prb => op_term("Prb", vec![arg]),
-                _ => value_ref_term_for_inst(unit, inst),
+                _ => value_ref_expr_for_inst(unit, inst),
             }
         }
         InstData::Binary { args, .. } => {
             let lhs = args.get(0).copied().unwrap_or_else(Value::invalid);
             let rhs = args.get(1).copied().unwrap_or_else(Value::invalid);
-            let lhs = pure_dfg_term_for_value(unit, lhs, cache)?;
-            let rhs = pure_dfg_term_for_value(unit, rhs, cache)?;
+            let lhs = value_ref_or_var(lhs, pure_set);
+            let rhs = value_ref_or_var(rhs, pure_set);
             match opcode {
                 Opcode::Add => op_term("Add", vec![lhs, rhs]),
                 Opcode::Sub => op_term("Sub", vec![lhs, rhs]),
@@ -704,20 +807,20 @@ fn pure_dfg_term_for_inst(
                 Opcode::Ule => op_term("Ule", vec![lhs, rhs]),
                 Opcode::Uge => op_term("Uge", vec![lhs, rhs]),
                 Opcode::Mux => op_term("Mux", vec![lhs, rhs]),
-                _ => value_ref_term_for_inst(unit, inst),
+                _ => value_ref_expr_for_inst(unit, inst),
             }
         }
         InstData::Ternary { args, .. } => {
             let a = args.get(0).copied().unwrap_or_else(Value::invalid);
             let b = args.get(1).copied().unwrap_or_else(Value::invalid);
             let c = args.get(2).copied().unwrap_or_else(Value::invalid);
-            let a = pure_dfg_term_for_value(unit, a, cache)?;
-            let b = pure_dfg_term_for_value(unit, b, cache)?;
-            let c = pure_dfg_term_for_value(unit, c, cache)?;
+            let a = value_ref_or_var(a, pure_set);
+            let b = value_ref_or_var(b, pure_set);
+            let c = value_ref_or_var(c, pure_set);
             match opcode {
                 Opcode::Shl => op_term("Shl", vec![a, b, c]),
                 Opcode::Shr => op_term("Shr", vec![a, b, c]),
-                _ => value_ref_term_for_inst(unit, inst),
+                _ => value_ref_expr_for_inst(unit, inst),
             }
         }
         InstData::InsExt { args, imms, .. }
@@ -728,87 +831,64 @@ fn pure_dfg_term_for_inst(
         {
             let a = args.get(0).copied().unwrap_or_else(Value::invalid);
             let b = args.get(1).copied().unwrap_or_else(Value::invalid);
-            let a = pure_dfg_term_for_value(unit, a, cache)?;
-            let b = pure_dfg_term_for_value(unit, b, cache)?;
+            let a = value_ref_or_var(a, pure_set);
+            let b = value_ref_or_var(b, pure_set);
             let imm0 = imms.get(0).copied().unwrap_or(0);
             let imm1 = imms.get(1).copied().unwrap_or(0);
+            let imm0 = expr_usize(imm0)?;
+            let imm1 = expr_usize(imm1)?;
             match opcode {
-                Opcode::InsField => op_term(
-                    "InsField",
-                    vec![
-                        a,
-                        b,
-                        Term::Atom(imm0.to_string()),
-                        Term::Atom(imm1.to_string()),
-                    ],
-                ),
-                Opcode::InsSlice => op_term(
-                    "InsSlice",
-                    vec![
-                        a,
-                        b,
-                        Term::Atom(imm0.to_string()),
-                        Term::Atom(imm1.to_string()),
-                    ],
-                ),
-                Opcode::ExtField => op_term(
-                    "ExtField",
-                    vec![
-                        a,
-                        b,
-                        Term::Atom(imm0.to_string()),
-                        Term::Atom(imm1.to_string()),
-                    ],
-                ),
-                Opcode::ExtSlice => op_term(
-                    "ExtSlice",
-                    vec![
-                        a,
-                        b,
-                        Term::Atom(imm0.to_string()),
-                        Term::Atom(imm1.to_string()),
-                    ],
-                ),
-                _ => value_ref_term_for_inst(unit, inst),
+                Opcode::InsField => op_term("InsField", vec![a, b, imm0, imm1]),
+                Opcode::InsSlice => op_term("InsSlice", vec![a, b, imm0, imm1]),
+                Opcode::ExtField => op_term("ExtField", vec![a, b, imm0, imm1]),
+                Opcode::ExtSlice => op_term("ExtSlice", vec![a, b, imm0, imm1]),
+                _ => value_ref_expr_for_inst(unit, inst),
             }
         }
-        _ => value_ref_term_for_inst(unit, inst),
+        _ => value_ref_expr_for_inst(unit, inst),
     };
 
-    Ok(term)
+    Ok(expr)
 }
 
-fn pure_dfg_terms_for_values(
-    unit: &Unit<'_>,
-    values: &[Value],
-    cache: &mut HashMap<Value, Term>,
-) -> Result<Vec<Term>> {
-    values
-        .iter()
-        .map(|&value| pure_dfg_term_for_value(unit, value, cache))
-        .collect()
+fn pure_value_var(value: Value) -> String {
+    format!("v{}", value.index())
 }
 
-fn value_ref_term(value: Value) -> Term {
+fn value_ref_or_var(value: Value, pure_set: &HashMap<Value, ()>) -> Expr {
     if value.is_invalid() {
-        op_term("ValueRef", vec![Term::Atom("-1".into())])
+        value_ref_expr(value)
+    } else if pure_set.contains_key(&value) {
+        expr_var(&pure_value_var(value))
     } else {
-        op_term("ValueRef", vec![Term::Atom(value.index().to_string())])
+        value_ref_expr(value)
     }
 }
 
-fn value_ref_term_for_inst(unit: &Unit<'_>, inst: Inst) -> Term {
+fn value_ref_expr(value: Value) -> Expr {
+    if value.is_invalid() {
+        op_term("ValueRef", vec![expr_i64(-1)])
+    } else {
+        op_term("ValueRef", vec![expr_i64(value.index() as i64)])
+    }
+}
+
+fn value_ref_expr_for_inst(unit: &Unit<'_>, inst: Inst) -> Expr {
     match unit.get_inst_result(inst) {
-        Some(value) => value_ref_term(value),
-        None => value_ref_term(Value::invalid()),
+        Some(value) => value_ref_expr(value),
+        None => value_ref_expr(Value::invalid()),
     }
 }
 
-fn op_term(name: &str, mut args: Vec<Term>) -> Term {
-    let mut items = Vec::with_capacity(args.len() + 1);
-    items.push(Term::Atom(name.into()));
-    items.append(&mut args);
-    Term::List(items)
+fn def_inst(unit: &Unit<'_>, value: Value) -> Option<Inst> {
+    match &unit[value] {
+        ValueData::Inst { inst, .. } => Some(*inst),
+        _ => None,
+    }
+}
+
+fn op_term(name: &str, args: Vec<Expr>) -> Expr {
+    expr_call(name, args)
 }
 
 fn collect_pure_roots(unit: &Unit<'_>) -> Vec<Value> {
@@ -1067,21 +1147,23 @@ fn resolve_blocks(block_map: &HashMap<usize, Block>, blocks: &[usize]) -> Result
         .collect()
 }
 
-fn parse_program(program: &str) -> Result<ParsedProgram> {
+fn parse_egglog_program(program: &str) -> Result<Vec<Command>> {
+    let mut parser = Parser::default();
+    parser
+        .get_program_from_string(None, program)
+        .map_err(|err| anyhow!("{err}"))
+}
+
+fn parse_commands(commands: &[Command]) -> Result<ParsedProgram> {
     let mut parsed = ParsedProgram::default();
-    for (line_no, line) in program.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with(';') {
-            continue;
-        }
-        let term =
-            parse_line(line).with_context(|| format!("parse error on line {}", line_no + 1))?;
-        let Term::List(items) = term else {
-            bail!("expected list on line {}", line_no + 1);
+    for command in commands {
+        let expr = match command {
+            Command::Action(Action::Expr(_, expr)) => expr,
+            Command::Action(Action::Let(_, _, _)) => continue,
+            other => bail!("unsupported command: {other}"),
         };
-        let (head, rest) = items.split_first().ok_or_else(|| anyhow!("empty term"))?;
-        let head = term_atom(head)?;
-        match head.as_str() {
+        let (head, rest) = expr_call_parts(expr)?;
+        match head {
             "Unit" => {
                 let (kind, name, sig) = parse_unit_entry(rest)?;
                 parsed.unit = Some(ParsedUnit { kind, name, sig });
@@ -1092,10 +1174,10 @@ fn parse_program(program: &str) -> Result<ParsedProgram> {
                 parsed.ext_units.insert(id, ext);
             }
             "BlockOrder" => {
-                parsed.block_order = rest
-                    .iter()
-                    .map(|term| parse_usize(term))
-                    .collect::<Result<_>>()?;
+                if rest.len() != 1 {
+                    bail!("BlockOrder entry expects list field");
+                }
+                parsed.block_order = parse_usize_list(&rest[0])?;
             }
             "Inst" => parsed.insts.push(parse_inst(rest)?),
             "ConstInt" => {
@@ -1135,12 +1217,12 @@ fn parse_program(program: &str) -> Result<ParsedProgram> {
     Ok(parsed)
 }
 
-fn parse_unit_entry(items: &[Term]) -> Result<(UnitKind, UnitName, Signature)> {
+fn parse_unit_entry(items: &[Expr]) -> Result<(UnitKind, UnitName, Signature)> {
     if items.len() != 6 {
         bail!("Unit entry expects 6 fields");
     }
-    let kind = parse_unit_kind(&term_atom(&items[0])?)?;
-    let name_tag = term_atom(&items[1])?;
+    let kind = parse_unit_kind(&parse_expr_atom(&items[0])?)?;
+    let name_tag = parse_expr_atom(&items[1])?;
     let name = parse_unit_name(&name_tag, &items[2])?;
     let inputs = parse_type_list(&items[3])?;
     let outputs = parse_type_list(&items[4])?;
@@ -1148,11 +1230,11 @@ fn parse_unit_entry(items: &[Term]) -> Result<(UnitKind, UnitName, Signature)> {
     Ok((kind, name, signature_from_parts(inputs, outputs, ret)))
 }
 
-fn parse_arg_value(items: &[Term]) -> Result<ArgValueEntry> {
+fn parse_arg_value(items: &[Expr]) -> Result<ArgValueEntry> {
     if items.len() != 3 {
         bail!("ArgValue entry expects 3 fields");
     }
-    let dir = match term_atom(&items[0])?.as_str() {
+    let dir = match parse_expr_atom(&items[0])?.as_str() {
         "input" => ArgDir::Input,
         "output" => ArgDir::Output,
         other => bail!("unknown ArgValue dir {}", other),
@@ -1164,12 +1246,12 @@ fn parse_arg_value(items: &[Term]) -> Result<ArgValueEntry> {
     })
 }
 
-fn parse_ext_unit(items: &[Term]) -> Result<(usize, ParsedExtUnit)> {
+fn parse_ext_unit(items: &[Expr]) -> Result<(usize, ParsedExtUnit)> {
     if items.len() != 6 {
         bail!("ExtUnit entry expects 6 fields");
     }
     let id = parse_usize(&items[0])?;
-    let name_tag = term_atom(&items[1])?;
+    let name_tag = parse_expr_atom(&items[1])?;
     let name = parse_unit_name(&name_tag, &items[2])?;
     let inputs = parse_type_list(&items[3])?;
     let outputs = parse_type_list(&items[4])?;
@@ -1178,17 +1260,14 @@ fn parse_ext_unit(items: &[Term]) -> Result<(usize, ParsedExtUnit)> {
     Ok((id, ParsedExtUnit { name, sig }))
 }
 
-fn parse_inst(items: &[Term]) -> Result<ParsedInst> {
+fn parse_inst(items: &[Expr]) -> Result<ParsedInst> {
     if items.len() != 8 {
         bail!("Inst entry expects 8 fields");
     }
     let inst_id = parse_usize(&items[0])?;
     let block_id = parse_usize(&items[1])?;
-    let opcode = parse_opcode(&term_atom(&items[2])?)?;
-    let result = match term_atom(&items[3])?.as_str() {
-        "none" => None,
-        other => Some(other.parse::<usize>().context("invalid result id")?),
-    };
+    let opcode = parse_opcode(&parse_expr_atom(&items[2])?)?;
+    let result = parse_optional_usize(&items[3])?;
     let ty = parse_type(&items[4])?;
     let args = parse_value_list(&items[5])?;
     let blocks = parse_usize_list(&items[6])?;
@@ -1205,25 +1284,25 @@ fn parse_inst(items: &[Term]) -> Result<ParsedInst> {
     })
 }
 
-fn parse_const_int(items: &[Term]) -> Result<(usize, ConstIntInfo)> {
+fn parse_const_int(items: &[Expr]) -> Result<(usize, ConstIntInfo)> {
     if items.len() != 3 {
         bail!("ConstInt entry expects 3 fields");
     }
     let inst_id = parse_usize(&items[0])?;
     let width = parse_usize(&items[1])?;
-    let value_str = term_string(&items[2])?;
+    let value_str = parse_expr_string(&items[2])?;
     let value = BigUint::parse_bytes(value_str.as_bytes(), 10)
         .ok_or_else(|| anyhow!("invalid ConstInt value"))?;
     Ok((inst_id, ConstIntInfo { width, value }))
 }
 
-fn parse_const_time(items: &[Term]) -> Result<(usize, ConstTimeInfo)> {
+fn parse_const_time(items: &[Expr]) -> Result<(usize, ConstTimeInfo)> {
     if items.len() != 5 {
         bail!("ConstTime entry expects 5 fields");
     }
     let inst_id = parse_usize(&items[0])?;
-    let num = parse_bigint(term_string(&items[1])?)?;
-    let den = parse_bigint(term_string(&items[2])?)?;
+    let num = parse_bigint(parse_expr_string(&items[1])?)?;
+    let den = parse_bigint(parse_expr_string(&items[2])?)?;
     let delta = parse_usize(&items[3])?;
     let epsilon = parse_usize(&items[4])?;
     Ok((
@@ -1237,7 +1316,7 @@ fn parse_const_time(items: &[Term]) -> Result<(usize, ConstTimeInfo)> {
     ))
 }
 
-fn parse_call_info(items: &[Term]) -> Result<(usize, CallInfo)> {
+fn parse_call_info(items: &[Expr]) -> Result<(usize, CallInfo)> {
     if items.len() != 3 {
         bail!("CallInfo entry expects 3 fields");
     }
@@ -1253,122 +1332,120 @@ fn parse_call_info(items: &[Term]) -> Result<(usize, CallInfo)> {
     ))
 }
 
-fn parse_reg_modes(items: &[Term]) -> Result<(usize, Vec<RegMode>)> {
+fn parse_reg_modes(items: &[Expr]) -> Result<(usize, Vec<RegMode>)> {
     if items.len() != 2 {
         bail!("RegModes entry expects 2 fields");
     }
     let inst_id = parse_usize(&items[0])?;
-    let modes = match &items[1] {
-        Term::List(values) => values
-            .iter()
-            .map(|term| parse_reg_mode(&term_atom(term)?))
-            .collect::<Result<Vec<_>>>()?,
-        _ => bail!("RegModes expects list"),
-    };
+    let modes = parse_expr_list(&items[1])?
+        .iter()
+        .map(|term| parse_reg_mode(&parse_expr_atom(term)?))
+        .collect::<Result<Vec<_>>>()?;
     Ok((inst_id, modes))
 }
 
-fn parse_value_list(term: &Term) -> Result<Vec<ParsedValue>> {
-    let Term::List(items) = term else {
-        bail!("expected list");
-    };
+fn parse_value_list(expr: &Expr) -> Result<Vec<ParsedValue>> {
+    let items = parse_expr_list(expr)?;
     items
         .iter()
-        .map(|item| match term_atom(item)?.as_str() {
-            "invalid" => Ok(ParsedValue::Invalid),
-            other => Ok(ParsedValue::Id(
-                other.parse::<usize>().context("invalid value id")?,
+        .map(|item| match item {
+            Expr::Var(_, atom) if atom == "invalid" => Ok(ParsedValue::Invalid),
+            Expr::Var(_, atom) => Ok(ParsedValue::Id(
+                atom.parse::<usize>().context("invalid value id")?,
             )),
+            Expr::Lit(_, Literal::Int(value)) => {
+                if *value < 0 {
+                    bail!("invalid value id");
+                }
+                Ok(ParsedValue::Id(
+                    usize::try_from(*value).context("invalid value id")?,
+                ))
+            }
+            _ => bail!("invalid value id"),
         })
         .collect()
 }
 
-fn parse_usize_list(term: &Term) -> Result<Vec<usize>> {
-    let Term::List(items) = term else {
-        bail!("expected list");
-    };
+fn parse_usize_list(expr: &Expr) -> Result<Vec<usize>> {
+    let items = parse_expr_list(expr)?;
     items.iter().map(parse_usize).collect()
 }
 
-fn parse_optional_type(term: &Term) -> Result<Option<Type>> {
-    if let Term::Atom(atom) = term {
+fn parse_optional_type(expr: &Expr) -> Result<Option<Type>> {
+    if let Expr::Var(_, atom) = expr {
         if atom == "None" {
             return Ok(None);
         }
     }
-    Ok(Some(parse_type(term)?))
+    Ok(Some(parse_type(expr)?))
 }
 
-fn parse_type_list(term: &Term) -> Result<Vec<Type>> {
-    let Term::List(items) = term else {
-        bail!("expected type list");
-    };
+fn parse_type_list(expr: &Expr) -> Result<Vec<Type>> {
+    let items = parse_expr_list(expr)?;
     items.iter().map(parse_type).collect()
 }
 
-fn parse_type(term: &Term) -> Result<Type> {
-    match term {
-        Term::Atom(atom) => match atom.as_str() {
+fn parse_type(expr: &Expr) -> Result<Type> {
+    match expr {
+        Expr::Var(_, atom) => match atom.as_str() {
             "Void" => Ok(void_ty()),
             "Time" => Ok(time_ty()),
             other => bail!("unknown type atom {}", other),
         },
-        Term::List(items) => {
-            let (head, rest) = items
-                .split_first()
-                .ok_or_else(|| anyhow!("empty type term"))?;
-            let head = term_atom(head)?;
-            match head.as_str() {
-                "IntTy" => Ok(int_ty(parse_usize(single(rest, "IntTy")?)?)),
-                "Enum" => Ok(enum_ty(parse_usize(single(rest, "Enum")?)?)),
-                "Pointer" => Ok(pointer_ty(parse_type(single_term(rest, "Pointer")?)?)),
-                "Signal" => Ok(signal_ty(parse_type(single_term(rest, "Signal")?)?)),
-                "ArrayTy" => {
-                    if rest.len() != 2 {
-                        bail!("ArrayTy expects 2 fields");
-                    }
-                    let len = parse_usize(&rest[0])?;
-                    let ty = parse_type(&rest[1])?;
-                    Ok(array_ty(len, ty))
+        Expr::Call(_, head, rest) => match head.as_str() {
+            "IntTy" => Ok(int_ty(parse_usize(single(rest, "IntTy")?)?)),
+            "Enum" => Ok(enum_ty(parse_usize(single(rest, "Enum")?)?)),
+            "Pointer" => Ok(pointer_ty(parse_type(single_term(rest, "Pointer")?)?)),
+            "Signal" => Ok(signal_ty(parse_type(single_term(rest, "Signal")?)?)),
+            "ArrayTy" => {
+                if rest.len() != 2 {
+                    bail!("ArrayTy expects 2 fields");
                 }
-                "StructTy" => {
-                    if rest.len() != 1 {
-                        bail!("StructTy expects list field");
-                    }
-                    let fields = parse_type_list(&rest[0])?;
-                    Ok(struct_ty(fields))
-                }
-                "FuncTy" => {
-                    if rest.len() != 2 {
-                        bail!("FuncTy expects args list and return type");
-                    }
-                    let args = parse_type_list(&rest[0])?;
-                    let ret = parse_type(&rest[1])?;
-                    Ok(func_ty(args, ret))
-                }
-                "EntityTy" => {
-                    if rest.len() != 2 {
-                        bail!("EntityTy expects inputs and outputs list");
-                    }
-                    let ins = parse_type_list(&rest[0])?;
-                    let outs = parse_type_list(&rest[1])?;
-                    Ok(llhd::ty::entity_ty(ins, outs))
-                }
-                other => bail!("unknown type form {}", other),
+                let len = parse_usize(&rest[0])?;
+                let ty = parse_type(&rest[1])?;
+                Ok(array_ty(len, ty))
             }
-        }
-        Term::Str(_) => bail!("unexpected string in type"),
+            "StructTy" => {
+                if rest.len() != 1 {
+                    bail!("StructTy expects list field");
+                }
+                let fields = parse_type_list(&rest[0])?;
+                Ok(struct_ty(fields))
+            }
+            "FuncTy" => {
+                if rest.len() != 2 {
+                    bail!("FuncTy expects args list and return type");
+                }
+                let args = parse_type_list(&rest[0])?;
+                let ret = parse_type(&rest[1])?;
+                Ok(func_ty(args, ret))
+            }
+            "EntityTy" => {
+                if rest.len() != 2 {
+                    bail!("EntityTy expects inputs and outputs list");
+                }
+                let ins = parse_type_list(&rest[0])?;
+                let outs = parse_type_list(&rest[1])?;
+                Ok(llhd::ty::entity_ty(ins, outs))
+            }
+            other => bail!("unknown type form {}", other),
+        },
+        Expr::Lit(_, Literal::String(_)) => bail!("unexpected string in type"),
+        Expr::Lit(_, Literal::Int(_)) => bail!("unexpected int in type"),
+        Expr::Lit(_, Literal::Float(_)) => bail!("unexpected float in type"),
+        Expr::Lit(_, Literal::Bool(_)) => bail!("unexpected bool in type"),
+        Expr::Lit(_, Literal::Unit) => bail!("unexpected unit in type"),
     }
 }
 
-fn single<'a>(rest: &'a [Term], name: &str) -> Result<&'a Term> {
+fn single<'a>(rest: &'a [Expr], name: &str) -> Result<&'a Expr> {
     if rest.len() != 1 {
         bail!("{} expects 1 field", name);
     }
     Ok(&rest[0])
 }
 
-fn single_term<'a>(rest: &'a [Term], name: &str) -> Result<&'a Term> {
+fn single_term<'a>(rest: &'a [Expr], name: &str) -> Result<&'a Expr> {
     single(rest, name)
 }
 
@@ -1537,76 +1614,61 @@ fn parse_reg_mode(atom: &str) -> Result<RegMode> {
     })
 }
 
-fn unit_name_terms(name: &UnitName) -> (Term, Term) {
+fn unit_name_terms(name: &UnitName) -> (Expr, Expr) {
     match name {
-        UnitName::Anonymous(id) => (Term::Atom("anon".into()), Term::Atom(id.to_string())),
-        UnitName::Local(name) => (Term::Atom("local".into()), Term::Str(name.clone())),
-        UnitName::Global(name) => (Term::Atom("global".into()), Term::Str(name.clone())),
+        UnitName::Anonymous(id) => (expr_atom("anon"), expr_i64(i64::from(*id))),
+        UnitName::Local(name) => (expr_atom("local"), expr_string(name.clone())),
+        UnitName::Global(name) => (expr_atom("global"), expr_string(name.clone())),
     }
 }
 
-fn parse_unit_name(tag: &str, value: &Term) -> Result<UnitName> {
+fn parse_unit_name(tag: &str, value: &Expr) -> Result<UnitName> {
     match tag {
         "anon" => Ok(UnitName::Anonymous(parse_usize(value)? as u32)),
-        "local" => Ok(UnitName::Local(term_string(value)?)),
-        "global" => Ok(UnitName::Global(term_string(value)?)),
+        "local" => Ok(UnitName::Local(parse_expr_string(value)?)),
+        "global" => Ok(UnitName::Global(parse_expr_string(value)?)),
         other => bail!("unknown unit name tag {}", other),
     }
 }
 
-fn type_term(ty: &Type) -> Term {
+fn type_term(ty: &Type) -> Expr {
     match ty.as_ref() {
-        TypeKind::VoidType => Term::Atom("Void".into()),
-        TypeKind::TimeType => Term::Atom("Time".into()),
-        TypeKind::IntType(bits) => Term::List(vec![
-            Term::Atom("IntTy".into()),
-            Term::Atom(bits.to_string()),
-        ]),
-        TypeKind::EnumType(states) => Term::List(vec![
-            Term::Atom("Enum".into()),
-            Term::Atom(states.to_string()),
-        ]),
-        TypeKind::PointerType(inner) => {
-            Term::List(vec![Term::Atom("Pointer".into()), type_term(inner)])
+        TypeKind::VoidType => expr_atom("Void"),
+        TypeKind::TimeType => expr_atom("Time"),
+        TypeKind::IntType(bits) => expr_call("IntTy", vec![expr_i64(*bits as i64)]),
+        TypeKind::EnumType(states) => expr_call("Enum", vec![expr_i64(*states as i64)]),
+        TypeKind::PointerType(inner) => expr_call("Pointer", vec![type_term(inner)]),
+        TypeKind::SignalType(inner) => expr_call("Signal", vec![type_term(inner)]),
+        TypeKind::ArrayType(len, inner) => {
+            expr_call("ArrayTy", vec![expr_i64(*len as i64), type_term(inner)])
         }
-        TypeKind::SignalType(inner) => {
-            Term::List(vec![Term::Atom("Signal".into()), type_term(inner)])
+        TypeKind::StructType(fields) => expr_call(
+            "StructTy",
+            vec![types_list(fields.iter().cloned().collect())],
+        ),
+        TypeKind::FuncType(args, ret) => {
+            expr_call("FuncTy", vec![types_list(args.clone()), type_term(ret)])
         }
-        TypeKind::ArrayType(len, inner) => Term::List(vec![
-            Term::Atom("ArrayTy".into()),
-            Term::Atom(len.to_string()),
-            type_term(inner),
-        ]),
-        TypeKind::StructType(fields) => Term::List(vec![
-            Term::Atom("StructTy".into()),
-            types_list(fields.iter().cloned().collect()),
-        ]),
-        TypeKind::FuncType(args, ret) => Term::List(vec![
-            Term::Atom("FuncTy".into()),
-            types_list(args.clone()),
-            type_term(ret),
-        ]),
-        TypeKind::EntityType(ins, outs) => Term::List(vec![
-            Term::Atom("EntityTy".into()),
-            types_list(ins.clone()),
-            types_list(outs.clone()),
-        ]),
+        TypeKind::EntityType(ins, outs) => expr_call(
+            "EntityTy",
+            vec![types_list(ins.clone()), types_list(outs.clone())],
+        ),
     }
 }
 
-fn types_list(types: Vec<Type>) -> Term {
-    Term::List(types.iter().map(type_term).collect())
+fn types_list(types: Vec<Type>) -> Expr {
+    expr_list(types.iter().map(type_term).collect())
 }
 
-fn values_list(values: Vec<Term>) -> Term {
-    Term::List(values)
+fn values_list(values: Vec<Expr>) -> Expr {
+    expr_list(values)
 }
 
-fn parsed_value_term(value: Value) -> Term {
+fn parsed_value_term(value: Value) -> Result<Expr> {
     if value.is_invalid() {
-        Term::Atom("invalid".into())
+        Ok(expr_atom("invalid"))
     } else {
-        Term::Atom(value.index().to_string())
+        expr_usize(value.index())
     }
 }
 
@@ -1628,177 +1690,98 @@ fn eclass_id(class: EClassRef) -> u32 {
     class.0.rep()
 }
 
-fn parse_usize(term: &Term) -> Result<usize> {
-    let atom = term_atom(term)?;
-    atom.parse::<usize>().context("invalid usize")
+fn parse_optional_usize(expr: &Expr) -> Result<Option<usize>> {
+    match expr {
+        Expr::Var(_, atom) if atom == "none" => Ok(None),
+        Expr::Var(_, atom) => Ok(Some(atom.parse::<usize>().context("invalid usize")?)),
+        Expr::Lit(_, Literal::Int(value)) => {
+            if *value < 0 {
+                bail!("invalid usize");
+            }
+            Ok(Some(usize::try_from(*value).context("invalid usize")?))
+        }
+        _ => bail!("invalid optional usize"),
+    }
+}
+
+fn parse_usize(expr: &Expr) -> Result<usize> {
+    let value = parse_expr_int(expr)?;
+    if value < 0 {
+        bail!("invalid usize");
+    }
+    usize::try_from(value).context("invalid usize")
 }
 
 fn parse_bigint(value: String) -> Result<BigInt> {
     value.parse::<BigInt>().context("invalid bigint")
 }
 
-fn term_atom(term: &Term) -> Result<String> {
-    match term {
-        Term::Atom(value) => Ok(value.clone()),
+fn parse_expr_atom(expr: &Expr) -> Result<String> {
+    match expr {
+        Expr::Var(_, value) => Ok(value.clone()),
         _ => bail!("expected atom"),
     }
 }
 
-fn term_string(term: &Term) -> Result<String> {
-    match term {
-        Term::Str(value) => Ok(value.clone()),
-        Term::Atom(value) => Ok(value.clone()),
+fn parse_expr_string(expr: &Expr) -> Result<String> {
+    match expr {
+        Expr::Lit(_, Literal::String(value)) => Ok(value.clone()),
+        Expr::Var(_, value) => Ok(value.clone()),
         _ => bail!("expected string"),
     }
 }
 
-#[derive(Debug, Clone)]
-enum Token {
-    LParen,
-    RParen,
-    LBracket,
-    RBracket,
-    Symbol(String),
-    Str(String),
-}
-
-fn parse_line(line: &str) -> Result<Term> {
-    let tokens = tokenize(line)?;
-    let mut idx = 0;
-    let term = parse_term(&tokens, &mut idx)?;
-    if idx != tokens.len() {
-        bail!("unexpected tokens after term");
-    }
-    Ok(term)
-}
-
-fn parse_term(tokens: &[Token], idx: &mut usize) -> Result<Term> {
-    let token = tokens.get(*idx).ok_or_else(|| anyhow!("unexpected end"))?;
-    match token {
-        Token::LParen | Token::LBracket => {
-            let closing = matches!(token, Token::LParen)
-                .then_some(Token::RParen)
-                .unwrap_or(Token::RBracket);
-            *idx += 1;
-            let mut items = Vec::new();
-            while *idx < tokens.len() {
-                if matches!(tokens[*idx], Token::RParen) || matches!(tokens[*idx], Token::RBracket)
-                {
-                    break;
-                }
-                items.push(parse_term(tokens, idx)?);
-            }
-            if *idx >= tokens.len() {
-                bail!("missing closing delimiter");
-            }
-            let close = &tokens[*idx];
-            if std::mem::discriminant(close) != std::mem::discriminant(&closing) {
-                bail!("mismatched closing delimiter");
-            }
-            *idx += 1;
-            Ok(Term::List(items))
-        }
-        Token::Symbol(value) => {
-            *idx += 1;
-            Ok(Term::Atom(value.clone()))
-        }
-        Token::Str(value) => {
-            *idx += 1;
-            Ok(Term::Str(value.clone()))
-        }
-        Token::RParen | Token::RBracket => bail!("unexpected closing delimiter"),
+fn parse_expr_int(expr: &Expr) -> Result<i64> {
+    match expr {
+        Expr::Lit(_, Literal::Int(value)) => Ok(*value),
+        _ => bail!("expected integer"),
     }
 }
 
-fn tokenize(line: &str) -> Result<Vec<Token>> {
-    let mut tokens = Vec::new();
-    let mut chars = line.chars().peekable();
-    while let Some(&ch) = chars.peek() {
-        match ch {
-            '(' => {
-                chars.next();
-                tokens.push(Token::LParen);
-            }
-            ')' => {
-                chars.next();
-                tokens.push(Token::RParen);
-            }
-            '[' => {
-                chars.next();
-                tokens.push(Token::LBracket);
-            }
-            ']' => {
-                chars.next();
-                tokens.push(Token::RBracket);
-            }
-            '"' => {
-                chars.next();
-                let mut out = String::new();
-                while let Some(next) = chars.next() {
-                    match next {
-                        '"' => break,
-                        '\\' => {
-                            let escaped = chars.next().ok_or_else(|| anyhow!("invalid escape"))?;
-                            match escaped {
-                                '"' => out.push('"'),
-                                '\\' => out.push('\\'),
-                                'n' => out.push('\n'),
-                                other => out.push(other),
-                            }
-                        }
-                        other => out.push(other),
-                    }
-                }
-                tokens.push(Token::Str(out));
-            }
-            ';' => break,
-            _ if ch.is_whitespace() => {
-                chars.next();
-            }
-            _ => {
-                let mut out = String::new();
-                while let Some(&c) = chars.peek() {
-                    if c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']') {
-                        break;
-                    }
-                    out.push(c);
-                    chars.next();
-                }
-                tokens.push(Token::Symbol(out));
-            }
-        }
+fn parse_expr_list(expr: &Expr) -> Result<Vec<Expr>> {
+    let (head, args) = expr_call_parts(expr)?;
+    if head != "list" {
+        bail!("expected list");
     }
-    Ok(tokens)
+    Ok(args.to_vec())
 }
 
-fn format_term(term: &Term) -> String {
-    match term {
-        Term::Atom(value) => value.clone(),
-        Term::Str(value) => format!("\"{}\"", escape_string(value)),
-        Term::List(values) => {
-            let mut out = String::new();
-            out.push('(');
-            for (idx, value) in values.iter().enumerate() {
-                if idx > 0 {
-                    out.push(' ');
-                }
-                out.push_str(&format_term(value));
-            }
-            out.push(')');
-            out
-        }
+fn expr_call_parts(expr: &Expr) -> Result<(&str, &[Expr])> {
+    match expr {
+        Expr::Call(_, head, args) => Ok((head.as_str(), args.as_slice())),
+        _ => bail!("expected call"),
     }
 }
 
-fn escape_string(value: &str) -> String {
-    let mut out = String::new();
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            _ => out.push(ch),
-        }
-    }
-    out
+fn expr_atom(value: impl Into<String>) -> Expr {
+    Expr::Var(egglog::span!(), value.into())
+}
+
+fn expr_var(value: &str) -> Expr {
+    Expr::Var(egglog::span!(), value.to_string())
+}
+
+fn expr_string(value: String) -> Expr {
+    Expr::Lit(egglog::span!(), Literal::String(value))
+}
+
+fn expr_i64(value: i64) -> Expr {
+    Expr::Lit(egglog::span!(), Literal::Int(value))
+}
+
+fn expr_usize(value: usize) -> Result<Expr> {
+    let value = i64::try_from(value).map_err(|_| anyhow!("value out of i64 range"))?;
+    Ok(expr_i64(value))
+}
+
+fn expr_list(values: Vec<Expr>) -> Expr {
+    expr_call("list", values)
+}
+
+fn expr_call(name: &str, args: Vec<Expr>) -> Expr {
+    Expr::Call(egglog::span!(), name.to_string(), args)
+}
+
+fn expr_command(expr: Expr) -> Command {
+    Command::Action(Action::Expr(egglog::span!(), expr))
 }
