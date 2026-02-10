@@ -1,0 +1,23 @@
+[package]
+name = "llhd-egglog"
+version = "0.1.0"
+edition = "2021"
+
+description = "Egglog CFG skeleton and e-graph utilities for LLHD"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/fabianschuiki/llhd"
+
+[dependencies]
+anyhow = "1.0"
+egglog-bridge = { git = "https://github.com/egraphs-good/egglog", package = "egglog-bridge", branch = "main" }
+egglog-core-relations = { git = "https://github.com/egraphs-good/egglog", package = "egglog-core-relations", branch = "main" }
+egglog-numeric-id = { git = "https://github.com/egraphs-good/egglog", package = "egglog-numeric-id", branch = "main" }
+llhd = { git = "https://github.com/fabianschuiki/llhd", branch = "master" }
+log = "0.4"
+num = { version = "0.3", features = ["serde"] }
+
+[features]
+egglog-debug = []
+
+[dev-dependencies]
+rayon = "1.3"

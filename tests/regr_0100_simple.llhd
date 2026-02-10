@@ -1,0 +1,16 @@
+; RUN: llhd-opt %s
+proc @foo () -> (i1$ %out) {
+0:
+    %delta = const time 0s 1d
+    %k0 = const i1 0
+    drv i1$ %out, %k0, %delta
+    br %0
+}
+
+; CHECK:  proc @foo () -> (i1$ %out) {
+; CHECK:  0:
+; CHECK:      %delta = const time 0s 1d
+; CHECK:      %k0 = const i1 0
+; CHECK:      drv i1$ %out, %k0, %delta
+; CHECK:      br %0
+; CHECK:  }

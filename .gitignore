@@ -1,0 +1,11 @@
+/target
+.cargo-ok
+.DS_Store
+Cargo.lock
+.idea
+.vs
+.vscode
+
+# Testing
+**/proptest-regressions/**
+wirelog/*.csv
