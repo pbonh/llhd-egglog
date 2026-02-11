@@ -5,7 +5,7 @@ use super::names::{opcode_atom, reg_mode_atom, unit_kind_atom, unit_name_terms};
 use super::pure_dfg::append_pure_dfg_commands;
 use super::types::{type_term, types_list};
 use crate::cfg::{CfgSkeleton, SkeletonStmt, SkeletonTerminator};
-use crate::egraph::{EClassRef, UnitEGraph};
+use crate::egraph::{is_pure_opcode, EClassRef, UnitEGraph};
 use crate::schema::{
     CFG_SK_BLOCK, CFG_SK_BLOCK_ARG, CFG_SK_EFFECT, CFG_SK_TERM_BR, CFG_SK_TERM_BR_COND,
     CFG_SK_TERM_HALT, CFG_SK_TERM_RET, CFG_SK_TERM_RET_VALUE, CFG_SK_TERM_WAIT,
@@ -116,6 +116,9 @@ pub fn unit_to_egglog_commands(unit: &Unit<'_>) -> Result<Vec<Command>> {
     for bb in unit.blocks() {
         for inst in unit.insts(bb) {
             let data = &unit[inst];
+            if is_pure_opcode(data.opcode()) {
+                continue;
+            }
             let opcode = expr_atom(opcode_atom(data.opcode()));
             let result = unit
                 .get_inst_result(inst)

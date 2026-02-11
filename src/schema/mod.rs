@@ -7,5 +7,5 @@ pub use self::cfg::{
     CFG_SK_TERM_BR, CFG_SK_TERM_BR_COND, CFG_SK_TERM_HALT, CFG_SK_TERM_RET, CFG_SK_TERM_RET_VALUE,
     CFG_SK_TERM_WAIT, CFG_SK_TERM_WAIT_TIME,
 };
-pub use self::dfg::LlhdDfgSchema;
+pub use self::dfg::{pure_dfg_schema_program, LlhdDfgSchema};
 pub use self::vec_value::VecValue;

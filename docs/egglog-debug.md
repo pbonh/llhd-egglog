@@ -8,7 +8,7 @@ zero-cost at runtime when the feature is disabled.
 
 When enabled, the test writes a human-readable dump per unit that includes:
 - Unit metadata (name, kind, signature)
-- Serialization schema notes (Unit, ArgValue, Inst, etc.)
+- Serialization schema notes (Unit, ArgValue, Inst, PureDef, etc.)
 - CFG skeleton schema
 - The exact egglog facts emitted by `unit_to_egglog_program`
 

@@ -35,6 +35,15 @@ pub(crate) struct ParsedInst {
     pub(crate) imms: Vec<usize>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PureDefEntry {
+    pub(crate) inst_id: usize,
+    pub(crate) value_id: usize,
+    pub(crate) block_id: usize,
+    pub(crate) ty: Type,
+    pub(crate) term: Expr,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ParsedValue {
     Invalid,
@@ -81,6 +90,7 @@ pub(crate) struct ParsedProgram {
     pub(crate) ext_units: HashMap<usize, ParsedExtUnit>,
     pub(crate) block_order: Vec<usize>,
     pub(crate) insts: Vec<ParsedInst>,
+    pub(crate) pure_defs: Vec<PureDefEntry>,
     pub(crate) const_ints: HashMap<usize, ConstIntInfo>,
     pub(crate) const_times: HashMap<usize, ConstTimeInfo>,
     pub(crate) call_info: HashMap<usize, CallInfo>,
@@ -120,6 +130,7 @@ pub(crate) fn parse_commands(commands: &[Command]) -> Result<ParsedProgram> {
                 parsed.block_order = parse_usize_list(&rest[0])?;
             }
             "Inst" => parsed.insts.push(parse_inst(rest)?),
+            "PureDef" => parsed.pure_defs.push(parse_pure_def(rest)?),
             "ConstInt" => {
                 let (inst_id, info) = parse_const_int(rest)?;
                 parsed.const_ints.insert(inst_id, info);
@@ -190,6 +201,24 @@ fn parse_ext_unit(items: &[Expr]) -> Result<(usize, ParsedExtUnit)> {
     let ret = parse_optional_type(&items[5])?;
     let sig = signature_from_parts(inputs, outputs, ret);
     Ok((id, ParsedExtUnit { name, sig }))
+}
+
+fn parse_pure_def(items: &[Expr]) -> Result<PureDefEntry> {
+    if items.len() != 5 {
+        bail!("PureDef entry expects 5 fields");
+    }
+    let inst_id = parse_usize(&items[0])?;
+    let value_id = parse_usize(&items[1])?;
+    let block_id = parse_usize(&items[2])?;
+    let ty = parse_type(&items[3])?;
+    let term = items[4].clone();
+    Ok(PureDefEntry {
+        inst_id,
+        value_id,
+        block_id,
+        ty,
+        term,
+    })
 }
 
 fn parse_inst(items: &[Expr]) -> Result<ParsedInst> {

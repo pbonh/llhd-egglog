@@ -1,10 +1,14 @@
+use super::ast::{
+    expr_call_parts, parse_expr_int, parse_expr_list, parse_expr_string, parse_usize,
+};
 use super::parse::{parse_commands, parse_egglog_program, ArgDir, ParsedValue};
 use anyhow::{anyhow, bail, Result};
+use egglog::ast::Expr;
 use llhd::ir::{Block, ExtUnit, InstData, Opcode, RegMode, UnitBuilder, UnitData, Value};
 use llhd::table::TableKey;
-use llhd::ty::Type;
+use llhd::ty::{Type, TypeKind};
 use llhd::value::{IntValue, TimeValue};
-use num::{BigInt, BigRational, Zero};
+use num::{BigInt, BigRational, BigUint, Zero};
 use std::collections::HashMap;
 
 /// Deserialize a unit from an egglog-style program.
@@ -72,6 +76,15 @@ pub fn unit_from_egglog_commands(commands: &[::egglog::ast::Command]) -> Result<
             }
         }
     }
+    for pure_def in &parsed.pure_defs {
+        if let Some(existing) = value_types.get(&pure_def.value_id) {
+            if existing != &pure_def.ty {
+                bail!("value type mismatch for pure value {}", pure_def.value_id);
+            }
+        } else {
+            value_types.insert(pure_def.value_id, pure_def.ty.clone());
+        }
+    }
 
     let mut value_map: HashMap<usize, (Value, bool)> = HashMap::new();
     for (idx, arg) in sig.inputs().enumerate() {
@@ -86,52 +99,109 @@ pub fn unit_from_egglog_commands(commands: &[::egglog::ast::Command]) -> Result<
     }
 
     let mut ext_map = HashMap::new();
-    for (id, ext) in parsed.ext_units {
-        let ext_unit = builder.add_extern(ext.name, ext.sig);
-        ext_map.insert(id, ext_unit);
+    for (id, ext) in &parsed.ext_units {
+        let ext_unit = builder.add_extern(ext.name.clone(), ext.sig.clone());
+        ext_map.insert(*id, ext_unit);
     }
 
     let mut block_map = HashMap::new();
-    for block_id in parsed.block_order {
+    for block_id in &parsed.block_order {
         let bb = builder.block();
-        block_map.insert(block_id, bb);
+        block_map.insert(*block_id, bb);
     }
 
-    for inst in parsed.insts {
-        let bb = *block_map
-            .get(&inst.block_id)
-            .ok_or_else(|| anyhow!("missing block {}", inst.block_id))?;
-        builder.append_to(bb);
+    enum InstEntry<'a> {
+        Pure(&'a super::parse::PureDefEntry),
+        Effect(&'a super::parse::ParsedInst),
+    }
 
-        let args = resolve_values(&mut builder, &value_types, &mut value_map, &inst.args)?;
-        let blocks = resolve_blocks(&block_map, &inst.blocks)?;
-        let imms = inst.imms;
-        let inst_data = build_inst_data(
-            inst.opcode,
-            args,
-            blocks,
-            imms,
-            &parsed.const_ints,
-            &parsed.const_times,
-            &parsed.call_info,
-            &parsed.reg_modes,
-            &ext_map,
-            inst.inst_id,
-        )?;
-        let created = builder.build_inst(inst_data, inst.ty.clone());
-        if let Some(result_id) = inst.result {
-            let result = builder.inst_result(created);
-            match value_map.get(&result_id) {
-                None => {
-                    value_map.insert(result_id, (result, false));
-                }
-                Some((existing, is_placeholder)) => {
-                    if !*is_placeholder {
-                        bail!("duplicate value definition for {}", result_id);
+    let mut insts_by_block: HashMap<usize, Vec<InstEntry<'_>>> = HashMap::new();
+    for pure_def in &parsed.pure_defs {
+        insts_by_block
+            .entry(pure_def.block_id)
+            .or_default()
+            .push(InstEntry::Pure(pure_def));
+    }
+    for inst in &parsed.insts {
+        insts_by_block
+            .entry(inst.block_id)
+            .or_default()
+            .push(InstEntry::Effect(inst));
+    }
+
+    for block_id in &parsed.block_order {
+        let Some(bb) = block_map.get(block_id).copied() else {
+            continue;
+        };
+        let Some(entries) = insts_by_block.get_mut(block_id) else {
+            continue;
+        };
+        entries.sort_by_key(|entry| match entry {
+            InstEntry::Pure(def) => def.inst_id,
+            InstEntry::Effect(inst) => inst.inst_id,
+        });
+        for entry in entries.iter() {
+            builder.append_to(bb);
+            match entry {
+                InstEntry::Pure(def) => {
+                    let inst_data = build_pure_inst_data(
+                        &def.term,
+                        &def.ty,
+                        &mut builder,
+                        &value_types,
+                        &mut value_map,
+                    )?;
+                    let created = builder.build_inst(inst_data, def.ty.clone());
+                    let result = builder.inst_result(created);
+                    let result_id = def.value_id;
+                    match value_map.get(&result_id) {
+                        None => {
+                            value_map.insert(result_id, (result, false));
+                        }
+                        Some((existing, is_placeholder)) => {
+                            if !*is_placeholder {
+                                bail!("duplicate value definition for {}", result_id);
+                            }
+                            builder.replace_use(*existing, result);
+                            builder.remove_placeholder(*existing);
+                            value_map.insert(result_id, (result, false));
+                        }
                     }
-                    builder.replace_use(*existing, result);
-                    builder.remove_placeholder(*existing);
-                    value_map.insert(result_id, (result, false));
+                }
+                InstEntry::Effect(inst) => {
+                    let args =
+                        resolve_values(&mut builder, &value_types, &mut value_map, &inst.args)?;
+                    let blocks = resolve_blocks(&block_map, &inst.blocks)?;
+                    let imms = inst.imms.clone();
+                    let inst_data = build_inst_data(
+                        inst.opcode,
+                        args,
+                        blocks,
+                        imms,
+                        &parsed.const_ints,
+                        &parsed.const_times,
+                        &parsed.call_info,
+                        &parsed.reg_modes,
+                        &ext_map,
+                        inst.inst_id,
+                    )?;
+                    let created = builder.build_inst(inst_data, inst.ty.clone());
+                    if let Some(result_id) = inst.result {
+                        let result = builder.inst_result(created);
+                        match value_map.get(&result_id) {
+                            None => {
+                                value_map.insert(result_id, (result, false));
+                            }
+                            Some((existing, is_placeholder)) => {
+                                if !*is_placeholder {
+                                    bail!("duplicate value definition for {}", result_id);
+                                }
+                                builder.replace_use(*existing, result);
+                                builder.remove_placeholder(*existing);
+                                value_map.insert(result_id, (result, false));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -147,6 +217,336 @@ pub fn unit_from_egglog_commands(commands: &[::egglog::ast::Command]) -> Result<
 
     let _ = builder.finish();
     Ok(data)
+}
+
+#[derive(Debug, Clone)]
+enum PureTerm {
+    ConstInt(String),
+    ConstTime {
+        num: String,
+        den: String,
+        delta: usize,
+        epsilon: usize,
+    },
+    ArrayUniform {
+        len: usize,
+        arg: ParsedValue,
+    },
+    Array {
+        args: Vec<ParsedValue>,
+    },
+    Struct {
+        args: Vec<ParsedValue>,
+    },
+    Unary {
+        opcode: Opcode,
+        arg: ParsedValue,
+    },
+    Binary {
+        opcode: Opcode,
+        lhs: ParsedValue,
+        rhs: ParsedValue,
+    },
+    Ternary {
+        opcode: Opcode,
+        a: ParsedValue,
+        b: ParsedValue,
+        c: ParsedValue,
+    },
+    InsExt {
+        opcode: Opcode,
+        a: ParsedValue,
+        b: ParsedValue,
+        imm0: usize,
+        imm1: usize,
+    },
+}
+
+fn build_pure_inst_data(
+    term: &Expr,
+    ty: &Type,
+    builder: &mut UnitBuilder<'_>,
+    value_types: &HashMap<usize, Type>,
+    value_map: &mut HashMap<usize, (Value, bool)>,
+) -> Result<InstData> {
+    let term = parse_pure_term(term)?;
+    Ok(match term {
+        PureTerm::ConstInt(value) => {
+            let width = match ty.as_ref() {
+                TypeKind::IntType(bits) => *bits as usize,
+                other => bail!("ConstInt expects int type, got {:?}", other),
+            };
+            let value = BigUint::parse_bytes(value.as_bytes(), 10)
+                .ok_or_else(|| anyhow!("invalid ConstInt value"))?;
+            InstData::ConstInt {
+                opcode: Opcode::ConstInt,
+                imm: IntValue::from_unsigned(width, value),
+            }
+        }
+        PureTerm::ConstTime {
+            num,
+            den,
+            delta,
+            epsilon,
+        } => {
+            let num = num
+                .parse::<BigInt>()
+                .map_err(|_| anyhow!("invalid ConstTime numerator"))?;
+            let den = den
+                .parse::<BigInt>()
+                .map_err(|_| anyhow!("invalid ConstTime denominator"))?;
+            let den = if den.is_zero() { BigInt::from(1) } else { den };
+            let time = BigRational::new(num, den);
+            let imm = TimeValue::new(time, delta, epsilon);
+            InstData::ConstTime {
+                opcode: Opcode::ConstTime,
+                imm,
+            }
+        }
+        PureTerm::ArrayUniform { len, arg } => {
+            let args = resolve_values(builder, value_types, value_map, &[arg])?;
+            let arg = args
+                .get(0)
+                .copied()
+                .ok_or_else(|| anyhow!("missing ArrayUniform arg"))?;
+            InstData::Array {
+                opcode: Opcode::ArrayUniform,
+                imms: [len],
+                args: [arg],
+            }
+        }
+        PureTerm::Array { args } => {
+            let args = resolve_values(builder, value_types, value_map, &args)?;
+            InstData::Aggregate {
+                opcode: Opcode::Array,
+                args,
+            }
+        }
+        PureTerm::Struct { args } => {
+            let args = resolve_values(builder, value_types, value_map, &args)?;
+            InstData::Aggregate {
+                opcode: Opcode::Struct,
+                args,
+            }
+        }
+        PureTerm::Unary { opcode, arg } => {
+            let args = resolve_values(builder, value_types, value_map, &[arg])?;
+            let arg = args
+                .get(0)
+                .copied()
+                .ok_or_else(|| anyhow!("missing unary arg"))?;
+            InstData::Unary {
+                opcode,
+                args: [arg],
+            }
+        }
+        PureTerm::Binary { opcode, lhs, rhs } => {
+            let args = resolve_values(builder, value_types, value_map, &[lhs, rhs])?;
+            let lhs = args
+                .get(0)
+                .copied()
+                .ok_or_else(|| anyhow!("missing binary lhs"))?;
+            let rhs = args
+                .get(1)
+                .copied()
+                .ok_or_else(|| anyhow!("missing binary rhs"))?;
+            InstData::Binary {
+                opcode,
+                args: [lhs, rhs],
+            }
+        }
+        PureTerm::Ternary { opcode, a, b, c } => {
+            let args = resolve_values(builder, value_types, value_map, &[a, b, c])?;
+            let a = args
+                .get(0)
+                .copied()
+                .ok_or_else(|| anyhow!("missing ternary arg0"))?;
+            let b = args
+                .get(1)
+                .copied()
+                .ok_or_else(|| anyhow!("missing ternary arg1"))?;
+            let c = args
+                .get(2)
+                .copied()
+                .ok_or_else(|| anyhow!("missing ternary arg2"))?;
+            InstData::Ternary {
+                opcode,
+                args: [a, b, c],
+            }
+        }
+        PureTerm::InsExt {
+            opcode,
+            a,
+            b,
+            imm0,
+            imm1,
+        } => {
+            let args = resolve_values(builder, value_types, value_map, &[a, b])?;
+            let a = args
+                .get(0)
+                .copied()
+                .ok_or_else(|| anyhow!("missing InsExt arg0"))?;
+            let b = args
+                .get(1)
+                .copied()
+                .ok_or_else(|| anyhow!("missing InsExt arg1"))?;
+            InstData::InsExt {
+                opcode,
+                args: [a, b],
+                imms: [imm0, imm1],
+            }
+        }
+    })
+}
+
+fn parse_pure_term(expr: &Expr) -> Result<PureTerm> {
+    let (head, args) = expr_call_parts(expr)?;
+    match head {
+        "ConstInt" => {
+            if args.len() != 1 {
+                bail!("ConstInt expects 1 field");
+            }
+            Ok(PureTerm::ConstInt(parse_expr_string(&args[0])?))
+        }
+        "ConstTime" => {
+            if args.len() != 4 {
+                bail!("ConstTime expects 4 fields");
+            }
+            let num = parse_expr_string(&args[0])?;
+            let den = parse_expr_string(&args[1])?;
+            let delta = parse_usize(&args[2])?;
+            let epsilon = parse_usize(&args[3])?;
+            Ok(PureTerm::ConstTime {
+                num,
+                den,
+                delta,
+                epsilon,
+            })
+        }
+        "ArrayUniform" => {
+            if args.len() != 2 {
+                bail!("ArrayUniform expects 2 fields");
+            }
+            let len = parse_usize(&args[0])?;
+            let arg = parse_value_ref(&args[1])?;
+            Ok(PureTerm::ArrayUniform { len, arg })
+        }
+        "Array" => {
+            if args.len() != 1 {
+                bail!("Array expects list field");
+            }
+            let args = parse_value_ref_list(&args[0])?;
+            Ok(PureTerm::Array { args })
+        }
+        "Struct" => {
+            if args.len() != 1 {
+                bail!("Struct expects list field");
+            }
+            let args = parse_value_ref_list(&args[0])?;
+            Ok(PureTerm::Struct { args })
+        }
+        "Alias" => parse_unary(Opcode::Alias, args),
+        "Not" => parse_unary(Opcode::Not, args),
+        "Neg" => parse_unary(Opcode::Neg, args),
+        "Sig" => parse_unary(Opcode::Sig, args),
+        "Prb" => parse_unary(Opcode::Prb, args),
+        "Add" => parse_binary(Opcode::Add, args),
+        "Sub" => parse_binary(Opcode::Sub, args),
+        "And" => parse_binary(Opcode::And, args),
+        "Or" => parse_binary(Opcode::Or, args),
+        "Xor" => parse_binary(Opcode::Xor, args),
+        "Smul" => parse_binary(Opcode::Smul, args),
+        "Sdiv" => parse_binary(Opcode::Sdiv, args),
+        "Smod" => parse_binary(Opcode::Smod, args),
+        "Srem" => parse_binary(Opcode::Srem, args),
+        "Umul" => parse_binary(Opcode::Umul, args),
+        "Udiv" => parse_binary(Opcode::Udiv, args),
+        "Umod" => parse_binary(Opcode::Umod, args),
+        "Urem" => parse_binary(Opcode::Urem, args),
+        "Eq" => parse_binary(Opcode::Eq, args),
+        "Neq" => parse_binary(Opcode::Neq, args),
+        "Slt" => parse_binary(Opcode::Slt, args),
+        "Sgt" => parse_binary(Opcode::Sgt, args),
+        "Sle" => parse_binary(Opcode::Sle, args),
+        "Sge" => parse_binary(Opcode::Sge, args),
+        "Ult" => parse_binary(Opcode::Ult, args),
+        "Ugt" => parse_binary(Opcode::Ugt, args),
+        "Ule" => parse_binary(Opcode::Ule, args),
+        "Uge" => parse_binary(Opcode::Uge, args),
+        "Mux" => parse_binary(Opcode::Mux, args),
+        "Shl" => parse_ternary(Opcode::Shl, args),
+        "Shr" => parse_ternary(Opcode::Shr, args),
+        "InsField" => parse_ins_ext(Opcode::InsField, args),
+        "InsSlice" => parse_ins_ext(Opcode::InsSlice, args),
+        "ExtField" => parse_ins_ext(Opcode::ExtField, args),
+        "ExtSlice" => parse_ins_ext(Opcode::ExtSlice, args),
+        other => bail!("unknown pure DFG term {}", other),
+    }
+}
+
+fn parse_value_ref(expr: &Expr) -> Result<ParsedValue> {
+    let (head, args) = expr_call_parts(expr)?;
+    if head != "ValueRef" {
+        bail!("expected ValueRef term");
+    }
+    if args.len() != 1 {
+        bail!("ValueRef expects 1 field");
+    }
+    let value = parse_expr_int(&args[0])?;
+    if value < 0 {
+        Ok(ParsedValue::Invalid)
+    } else {
+        Ok(ParsedValue::Id(value as usize))
+    }
+}
+
+fn parse_value_ref_list(expr: &Expr) -> Result<Vec<ParsedValue>> {
+    let items = parse_expr_list(expr)?;
+    items.iter().map(parse_value_ref).collect()
+}
+
+fn parse_unary(opcode: Opcode, args: &[Expr]) -> Result<PureTerm> {
+    if args.len() != 1 {
+        bail!("unary term expects 1 field");
+    }
+    let arg = parse_value_ref(&args[0])?;
+    Ok(PureTerm::Unary { opcode, arg })
+}
+
+fn parse_binary(opcode: Opcode, args: &[Expr]) -> Result<PureTerm> {
+    if args.len() != 2 {
+        bail!("binary term expects 2 fields");
+    }
+    let lhs = parse_value_ref(&args[0])?;
+    let rhs = parse_value_ref(&args[1])?;
+    Ok(PureTerm::Binary { opcode, lhs, rhs })
+}
+
+fn parse_ternary(opcode: Opcode, args: &[Expr]) -> Result<PureTerm> {
+    if args.len() != 3 {
+        bail!("ternary term expects 3 fields");
+    }
+    let a = parse_value_ref(&args[0])?;
+    let b = parse_value_ref(&args[1])?;
+    let c = parse_value_ref(&args[2])?;
+    Ok(PureTerm::Ternary { opcode, a, b, c })
+}
+
+fn parse_ins_ext(opcode: Opcode, args: &[Expr]) -> Result<PureTerm> {
+    if args.len() != 4 {
+        bail!("InsExt term expects 4 fields");
+    }
+    let a = parse_value_ref(&args[0])?;
+    let b = parse_value_ref(&args[1])?;
+    let imm0 = parse_usize(&args[2])?;
+    let imm1 = parse_usize(&args[3])?;
+    Ok(PureTerm::InsExt {
+        opcode,
+        a,
+        b,
+        imm0,
+        imm1,
+    })
 }
 
 fn build_inst_data(

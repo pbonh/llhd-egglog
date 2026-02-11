@@ -1,4 +1,5 @@
 use super::ast as egg_ast;
+use super::types::type_term;
 use crate::egraph::is_pure_opcode;
 use anyhow::Result;
 use egglog::ast::{Action, Command, Expr, RustSpan, Span};
@@ -10,6 +11,7 @@ pub(crate) fn append_pure_dfg_commands(unit: &Unit<'_>, commands: &mut Vec<Comma
     let roots = collect_pure_roots(unit);
     let pure_order = collect_pure_order(unit, &roots);
     let pure_set: HashMap<Value, ()> = pure_order.iter().map(|value| (*value, ())).collect();
+    let inst_blocks = collect_inst_blocks(unit);
 
     for value in &pure_order {
         let Some(inst) = def_inst(unit, *value) else {
@@ -19,9 +21,35 @@ pub(crate) fn append_pure_dfg_commands(unit: &Unit<'_>, commands: &mut Vec<Comma
         if !is_pure_opcode(data.opcode()) {
             continue;
         }
-        let expr = pure_dfg_expr_for_inst(unit, inst, data, &pure_set)?;
+        let expr = pure_dfg_expr_for_inst_with(unit, inst, data, |value| {
+            value_ref_or_var(value, &pure_set)
+        })?;
         let name = pure_value_var(*value);
         commands.push(Command::Action(Action::Let(::egglog::span!(), name, expr)));
+    }
+
+    for bb in unit.blocks() {
+        for inst in unit.insts(bb) {
+            let data = &unit[inst];
+            if !is_pure_opcode(data.opcode()) {
+                continue;
+            }
+            let Some(result) = unit.get_inst_result(inst) else {
+                continue;
+            };
+            let Some(block_id) = inst_blocks.get(&inst).copied() else {
+                continue;
+            };
+            let inst_id = egg_ast::expr_usize(inst.index())?;
+            let value_id = egg_ast::expr_usize(result.index())?;
+            let block_id = egg_ast::expr_usize(block_id)?;
+            let ty = type_term(&unit.inst_type(inst));
+            let expr = pure_dfg_expr_for_inst_with(unit, inst, data, value_ref_expr)?;
+            commands.push(egg_ast::expr_command(egg_ast::expr_call(
+                "PureDef",
+                vec![inst_id, value_id, block_id, ty, expr],
+            )));
+        }
     }
 
     for value in roots {
@@ -101,12 +129,15 @@ fn collect_pure_order(unit: &Unit<'_>, roots: &[Value]) -> Vec<Value> {
     order
 }
 
-fn pure_dfg_expr_for_inst(
+fn pure_dfg_expr_for_inst_with<F>(
     unit: &Unit<'_>,
     inst: Inst,
     data: &InstData,
-    pure_set: &HashMap<Value, ()>,
-) -> Result<Expr> {
+    arg_expr: F,
+) -> Result<Expr>
+where
+    F: Fn(Value) -> Expr,
+{
     let opcode = data.opcode();
     let expr = match data {
         InstData::ConstInt { imm, .. } => op_term(
@@ -114,33 +145,37 @@ fn pure_dfg_expr_for_inst(
             vec![egg_ast::expr_string(imm.value.to_string())],
         ),
         InstData::ConstTime { imm, .. } => {
-            op_term("ConstTime", vec![egg_ast::expr_string(imm.to_string())])
+            let num = imm.time.numer().clone();
+            let den = imm.time.denom().clone();
+            op_term(
+                "ConstTime",
+                vec![
+                    egg_ast::expr_string(num.to_string()),
+                    egg_ast::expr_string(den.to_string()),
+                    egg_ast::expr_usize(imm.delta)?,
+                    egg_ast::expr_usize(imm.epsilon)?,
+                ],
+            )
         }
         InstData::Array { args, imms, .. } if opcode == Opcode::ArrayUniform => {
             let len = imms.get(0).copied().unwrap_or(0);
             let arg = args.get(0).copied().unwrap_or_else(Value::invalid);
             op_term(
                 "ArrayUniform",
-                vec![egg_ast::expr_usize(len)?, value_ref_or_var(arg, pure_set)],
+                vec![egg_ast::expr_usize(len)?, arg_expr(arg)],
             )
         }
         InstData::Aggregate { args, .. } if opcode == Opcode::Array => {
-            let elems = args
-                .iter()
-                .map(|arg| value_ref_or_var(*arg, pure_set))
-                .collect();
+            let elems = args.iter().map(|arg| arg_expr(*arg)).collect();
             op_term("Array", vec![egg_ast::expr_list(elems)])
         }
         InstData::Aggregate { args, .. } if opcode == Opcode::Struct => {
-            let elems = args
-                .iter()
-                .map(|arg| value_ref_or_var(*arg, pure_set))
-                .collect();
+            let elems = args.iter().map(|arg| arg_expr(*arg)).collect();
             op_term("Struct", vec![egg_ast::expr_list(elems)])
         }
         InstData::Unary { args, .. } => {
             let arg = args.get(0).copied().unwrap_or_else(Value::invalid);
-            let arg = value_ref_or_var(arg, pure_set);
+            let arg = arg_expr(arg);
             match opcode {
                 Opcode::Alias => op_term("Alias", vec![arg]),
                 Opcode::Not => op_term("Not", vec![arg]),
@@ -153,8 +188,8 @@ fn pure_dfg_expr_for_inst(
         InstData::Binary { args, .. } => {
             let lhs = args.get(0).copied().unwrap_or_else(Value::invalid);
             let rhs = args.get(1).copied().unwrap_or_else(Value::invalid);
-            let lhs = value_ref_or_var(lhs, pure_set);
-            let rhs = value_ref_or_var(rhs, pure_set);
+            let lhs = arg_expr(lhs);
+            let rhs = arg_expr(rhs);
             match opcode {
                 Opcode::Add => op_term("Add", vec![lhs, rhs]),
                 Opcode::Sub => op_term("Sub", vec![lhs, rhs]),
@@ -187,9 +222,9 @@ fn pure_dfg_expr_for_inst(
             let a = args.get(0).copied().unwrap_or_else(Value::invalid);
             let b = args.get(1).copied().unwrap_or_else(Value::invalid);
             let c = args.get(2).copied().unwrap_or_else(Value::invalid);
-            let a = value_ref_or_var(a, pure_set);
-            let b = value_ref_or_var(b, pure_set);
-            let c = value_ref_or_var(c, pure_set);
+            let a = arg_expr(a);
+            let b = arg_expr(b);
+            let c = arg_expr(c);
             match opcode {
                 Opcode::Shl => op_term("Shl", vec![a, b, c]),
                 Opcode::Shr => op_term("Shr", vec![a, b, c]),
@@ -204,8 +239,8 @@ fn pure_dfg_expr_for_inst(
         {
             let a = args.get(0).copied().unwrap_or_else(Value::invalid);
             let b = args.get(1).copied().unwrap_or_else(Value::invalid);
-            let a = value_ref_or_var(a, pure_set);
-            let b = value_ref_or_var(b, pure_set);
+            let a = arg_expr(a);
+            let b = arg_expr(b);
             let imm0 = imms.get(0).copied().unwrap_or(0);
             let imm1 = imms.get(1).copied().unwrap_or(0);
             let imm0 = egg_ast::expr_usize(imm0)?;
@@ -262,6 +297,16 @@ fn def_inst(unit: &Unit<'_>, value: Value) -> Option<Inst> {
 
 fn op_term(name: &str, args: Vec<Expr>) -> Expr {
     egg_ast::expr_call(name, args)
+}
+
+fn collect_inst_blocks(unit: &Unit<'_>) -> HashMap<Inst, usize> {
+    let mut blocks = HashMap::new();
+    for bb in unit.blocks() {
+        for inst in unit.insts(bb) {
+            blocks.insert(inst, bb.index());
+        }
+    }
+    blocks
 }
 
 fn collect_pure_roots(unit: &Unit<'_>) -> Vec<Value> {

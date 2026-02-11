@@ -1,0 +1,6 @@
+entity @test_entity_extracted (i1 %in1, i1 %in2, i1 %in3) -> (i1$ %out1) {
+    %null = const time 0s 1e
+    %or1 = or i1 %in1, %in3
+    %and1 = and i1 %or1, %in2
+    drv i1$ %out1, %and1, %null
+}
