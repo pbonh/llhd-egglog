@@ -1,0 +1,8 @@
+brew 'cargo-audit'
+brew 'cargo-edit'
+brew 'cargo-watch'
+brew 'cargo-nextest'
+brew 'cargo-generate'
+brew 'cargo-udeps'
+brew 'bacon'
+brew 'rust-analyzer'

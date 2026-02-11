@@ -1,6 +1,6 @@
-use egglog::ast::{Command, Expr, Parser, PrintFunctionMode};
+use egglog::ast::{Command, Expr, Literal, Parser, PrintFunctionMode};
 use egglog::{CommandOutput, EGraph};
-use llhd::assembly::parse_module_unchecked;
+use llhd::assembly::{parse_module_unchecked, write_module_string};
 use llhd::ir::prelude::*;
 use llhd_egglog::{unit_from_egglog_program, unit_to_egglog_program, LlhdEgglogProgram};
 use std::collections::{HashMap, HashSet};
@@ -10,20 +10,72 @@ mod common;
 use common::units_equivalent;
 
 #[test]
-fn div_extract_roundtrip() {
-    let input_src = fs::read_to_string("./tests/2and_1or_common.llhd").expect("read input llhd");
-    let expected_src =
-        fs::read_to_string("./tests/2and_1or_common_extracted.llhd").expect("read expected llhd");
+fn div_extract_with_cfg() {
+    let input_src =
+        fs::read_to_string("./tests/div_extract_with_cfg.llhd").expect("read input llhd");
+    let expected_src = fs::read_to_string("./tests/div_extract_with_cfg_extracted.llhd")
+        .expect("read expected llhd");
 
     let input_module = parse_module_unchecked(&input_src).expect("parse input module");
     let expected_module = parse_module_unchecked(&expected_src).expect("parse expected module");
 
-    let input_unit = input_module.units().next().expect("input unit");
-    let expected_unit = expected_module.units().next().expect("expected unit");
+    let mut rebuilt = Module::new();
+    for decl in input_module.decls() {
+        let data = DeclData {
+            name: input_module[decl].name.clone(),
+            sig: input_module[decl].sig.clone(),
+            loc: input_module[decl].loc,
+        };
+        rebuilt.add_decl(data);
+    }
 
-    let schema_program = LlhdEgglogProgram::builder().build().with_pure_dfg_schema();
-    let schema_commands = schema_program.commands();
-    let program = unit_to_egglog_program(&input_unit).expect("egglog program");
+    for unit in input_module.units() {
+        let rebuilt_unit = rewrite_unit(unit);
+        rebuilt.add_unit(rebuilt_unit);
+    }
+
+    if std::env::var("LLHD_EGGLOG_DUMP").ok().as_deref() == Some("1") {
+        println!("{}", write_module_string(&rebuilt));
+    }
+
+    let mut right_units: Vec<_> = rebuilt.units().collect();
+    for left_unit in expected_module.units() {
+        let position = right_units.iter().position(|right_unit| {
+            left_unit.kind() == right_unit.kind()
+                && left_unit.sig() == right_unit.sig()
+                && left_unit.name() == right_unit.name()
+        });
+        let Some(index) = position else {
+            panic!("unit not found after div-extract-with-cfg");
+        };
+        let right_unit = right_units.swap_remove(index);
+        if let Err(err) = units_equivalent(left_unit, right_unit) {
+            panic!("unit mismatch after div-extract-with-cfg: {err}");
+        }
+    }
+
+    if !right_units.is_empty() {
+        panic!("extra units after div-extract-with-cfg");
+    }
+
+    let mut right_decls: Vec<_> = rebuilt.decls().collect();
+    for left_decl in expected_module.decls() {
+        let position = right_decls.iter().position(|right_decl| {
+            expected_module[left_decl].name == rebuilt[*right_decl].name
+                && expected_module[left_decl].sig == rebuilt[*right_decl].sig
+        });
+        let Some(index) = position else {
+            panic!("decl not found after div-extract-with-cfg");
+        };
+        right_decls.swap_remove(index);
+    }
+    if !right_decls.is_empty() {
+        panic!("extra decls after div-extract-with-cfg");
+    }
+}
+
+fn rewrite_unit(unit: Unit<'_>) -> UnitData {
+    let program = unit_to_egglog_program(&unit).expect("egglog program");
     let pure_rows = extract_pure_defs(&program);
     let root_facts = extract_root_facts(&program);
     let pure_facts = build_pure_facts(&pure_rows, &root_facts);
@@ -36,12 +88,20 @@ fn div_extract_roundtrip() {
     let schedule_src = strip_ruleset(&schedule_raw);
     let schedule = parse_commands(&mut parser, &schedule_src, "parse schedule");
     let pure_fact_program = pure_facts.join("\n");
-    let pure_fact_commands = parse_commands(&mut parser, &pure_fact_program, "parse pure facts");
+    let pure_fact_commands = normalize_value_vars(parse_commands(
+        &mut parser,
+        &pure_fact_program,
+        "parse pure facts",
+    ));
 
-    let mut program_commands: Vec<Command> = schema_commands;
+    let mut program_commands = LlhdEgglogProgram::builder()
+        .build()
+        .with_pure_dfg_schema()
+        .commands();
     program_commands.extend(pure_fact_commands);
     program_commands.extend(rules);
     program_commands.extend(schedule);
+
     let mut egraph = EGraph::default();
     egraph
         .run_program(program_commands)
@@ -49,15 +109,7 @@ fn div_extract_roundtrip() {
 
     let rewritten_defs = extract_rewritten_defs(&mut egraph);
     let rewritten_program = rebuild_program(&program, &pure_rows, &rewritten_defs);
-    let rebuilt_data = unit_from_egglog_program(&rewritten_program).expect("deserialize program");
-
-    let mut rebuilt_module = Module::new();
-    rebuilt_module.add_unit(rebuilt_data);
-    let rebuilt_unit = rebuilt_module.units().next().expect("rebuilt unit");
-
-    if let Err(err) = units_equivalent(expected_unit, rebuilt_unit) {
-        panic!("unit mismatch after div-extract: {err}");
-    }
+    unit_from_egglog_program(&rewritten_program).expect("deserialize program")
 }
 
 #[derive(Debug, Clone)]
@@ -544,4 +596,38 @@ fn parse_commands(parser: &mut Parser, program: &str, context: &str) -> Vec<Comm
     parser
         .get_program_from_string(None, program)
         .unwrap_or_else(|err| panic!("{context}: {err}"))
+}
+
+fn normalize_value_vars(commands: Vec<Command>) -> Vec<Command> {
+    commands
+        .into_iter()
+        .map(|command| match command {
+            Command::Action(egglog::ast::Action::Expr(span, expr)) => Command::Action(
+                egglog::ast::Action::Expr(span, normalize_value_var_expr(expr)),
+            ),
+            Command::Action(egglog::ast::Action::Let(span, name, expr)) => Command::Action(
+                egglog::ast::Action::Let(span, name, normalize_value_var_expr(expr)),
+            ),
+            other => other,
+        })
+        .collect()
+}
+
+fn normalize_value_var_expr(expr: Expr) -> Expr {
+    match expr {
+        Expr::Var(span, atom) => match parse_value_var_atom(&atom) {
+            Some(id) => Expr::Call(
+                span.clone(),
+                "ValueRef".to_string(),
+                vec![Expr::Lit(span, Literal::Int(id as i64))],
+            ),
+            None => Expr::Var(span, atom),
+        },
+        Expr::Call(span, head, args) => Expr::Call(
+            span,
+            head,
+            args.into_iter().map(normalize_value_var_expr).collect(),
+        ),
+        other => other,
+    }
 }

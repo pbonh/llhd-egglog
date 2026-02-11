@@ -1,0 +1,36 @@
+proc @fsm_step (i1$ %0, i1$ %1, i1$ %2, i1$ %3, i1$ %4, i1$ %5) -> (i1$ %6, i1$ %7) {
+8:
+    %9 = prb i1$ %1
+    %10 = const i1 0
+    %11 = eq i1 %9, %10
+    br %11, %12, %13
+12:
+    %14 = const i1 0
+    %15 = const time 0s 1e
+    drv i1$ %6, %14, %15
+    %16 = const i1 0
+    drv i1$ %7, %16, %15
+    wait %8 for %15
+13:
+    %17 = prb i1$ %2
+    %18 = prb i1$ %3
+    %19 = or i1 %17, %18
+    %20 = prb i1$ %4
+    %21 = prb i1$ %5
+    %22 = const i1 0
+    %23 = and i1 %19, %20
+    %24 = eq i1 %21, %22
+    br %24, %25, %26
+25:
+    %27 = const i1 1
+    %28 = const time 0s 1e
+    drv i1$ %6, %27, %28
+    drv i1$ %7, %23, %28
+    wait %8 for %28
+26:
+    %29 = const i1 0
+    %30 = const time 0s 1e
+    drv i1$ %6, %29, %30
+    drv i1$ %7, %23, %30
+    wait %8 for %30
+}

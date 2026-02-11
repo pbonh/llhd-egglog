@@ -1,0 +1,38 @@
+proc @fsm_step (i1$ %clk, i1$ %rst_n, i1$ %in1, i1$ %in2, i1$ %in3, i1$ %state_q) -> (i1$ %state_d, i1$ %out) {
+%entry:
+    %clk_v = prb i1$ %clk
+    %rst_v = prb i1$ %rst_n
+    %state_v = prb i1$ %state_q
+    %a = prb i1$ %in1
+    %b = prb i1$ %in2
+    %c = prb i1$ %in3
+    %rst0 = const i1 0
+    %reset = eq i1 %rst_v, %rst0
+    br %reset, %reset_block, %eval
+%reset_block:
+    %zero = const i1 0
+    %t0 = const time 0s 1e
+    drv i2$ %state_d, %zero, %t0
+    %out0 = const i1 0
+    drv i1$ %out, %out0, %t0
+    wait %entry for %t0
+%eval:
+    %and1 = and i1 %a, %c
+    %and2 = and i1 %b, %c
+    %or1 = or i1 %and1, %and2
+    %state0 = const i1 0
+    %is0 = eq i1 %state_v, %state0
+    br %is0, %state_idle, %state_busy
+%state_idle:
+    %next1 = const i1 1
+    %t1 = const time 0s 1e
+    drv i2$ %state_d, %next1, %t1
+    drv i1$ %out, %or1, %t1
+    wait %entry for %t1
+%state_busy:
+    %next2 = const i1 0
+    %t2 = const time 0s 1e
+    drv i2$ %state_d, %next2, %t2
+    drv i1$ %out, %or1, %t2
+    wait %entry for %t2
+}
