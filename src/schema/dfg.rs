@@ -1,4 +1,9 @@
 use super::VecValue;
+use crate::egglog::ast::expr_atom;
+#[cfg(test)]
+use crate::egglog::program::commands_to_string;
+use crate::egglog::{LlhdPureOp, LlhdSort};
+use egglog::ast::{Command, RustSpan, Schema, Span, Variant};
 use egglog_bridge::{ColumnTy, DefaultVal, EGraph, FunctionConfig, FunctionId, MergeFn};
 
 /// Egglog table ids for the LLHD DFG schema.
@@ -958,6 +963,434 @@ pub fn pure_dfg_schema_program() -> &'static str {
     PURE_DFG_SCHEMA_PROGRAM
 }
 
+/// Reference pure DFG schema as command list.
+pub fn pure_dfg_schema_commands() -> Vec<Command> {
+    let span = ::egglog::span!();
+    let mut commands = Vec::new();
+    commands.push(Command::Sort(
+        span.clone(),
+        LlhdSort::LlhdTy.to_string(),
+        None,
+    ));
+    commands.push(Command::Sort(
+        span.clone(),
+        LlhdSort::LlhdVecTy.to_string(),
+        Some((
+            "Vec".to_string(),
+            vec![expr_atom(LlhdSort::LlhdTy.as_str())],
+        )),
+    ));
+    commands.push(Command::Constructor {
+        span: span.clone(),
+        name: "Void".to_string(),
+        schema: Schema::new(Vec::new(), LlhdSort::LlhdTy.to_string()),
+        cost: None,
+        unextractable: false,
+    });
+    commands.push(Command::Constructor {
+        span: span.clone(),
+        name: "Time".to_string(),
+        schema: Schema::new(Vec::new(), LlhdSort::LlhdTy.to_string()),
+        cost: None,
+        unextractable: false,
+    });
+    commands.push(Command::Constructor {
+        span: span.clone(),
+        name: "IntTy".to_string(),
+        schema: Schema::new(vec!["i64".to_string()], LlhdSort::LlhdTy.to_string()),
+        cost: None,
+        unextractable: false,
+    });
+    commands.push(Command::Constructor {
+        span: span.clone(),
+        name: "Enum".to_string(),
+        schema: Schema::new(vec!["i64".to_string()], LlhdSort::LlhdTy.to_string()),
+        cost: None,
+        unextractable: false,
+    });
+    commands.push(Command::Constructor {
+        span: span.clone(),
+        name: "Pointer".to_string(),
+        schema: Schema::new(
+            vec![LlhdSort::LlhdTy.to_string()],
+            LlhdSort::LlhdTy.to_string(),
+        ),
+        cost: None,
+        unextractable: false,
+    });
+    commands.push(Command::Constructor {
+        span: span.clone(),
+        name: "Signal".to_string(),
+        schema: Schema::new(
+            vec![LlhdSort::LlhdTy.to_string()],
+            LlhdSort::LlhdTy.to_string(),
+        ),
+        cost: None,
+        unextractable: false,
+    });
+    commands.push(Command::Constructor {
+        span: span.clone(),
+        name: "ArrayTy".to_string(),
+        schema: Schema::new(
+            vec!["i64".to_string(), LlhdSort::LlhdTy.to_string()],
+            LlhdSort::LlhdTy.to_string(),
+        ),
+        cost: None,
+        unextractable: false,
+    });
+    commands.push(Command::Constructor {
+        span: span.clone(),
+        name: "StructTy".to_string(),
+        schema: Schema::new(
+            vec![LlhdSort::LlhdVecTy.to_string()],
+            LlhdSort::LlhdTy.to_string(),
+        ),
+        cost: None,
+        unextractable: false,
+    });
+    commands.push(Command::Constructor {
+        span: span.clone(),
+        name: "FuncTy".to_string(),
+        schema: Schema::new(
+            vec![
+                LlhdSort::LlhdVecTy.to_string(),
+                LlhdSort::LlhdTy.to_string(),
+            ],
+            LlhdSort::LlhdTy.to_string(),
+        ),
+        cost: None,
+        unextractable: false,
+    });
+    commands.push(Command::Constructor {
+        span: span.clone(),
+        name: "EntityTy".to_string(),
+        schema: Schema::new(
+            vec![
+                LlhdSort::LlhdVecTy.to_string(),
+                LlhdSort::LlhdVecTy.to_string(),
+            ],
+            LlhdSort::LlhdTy.to_string(),
+        ),
+        cost: None,
+        unextractable: false,
+    });
+
+    let mut variants = Vec::new();
+    variants.push(pure_variant(LlhdPureOp::ValueRef, &["i64"]));
+    variants.push(pure_variant(LlhdPureOp::ConstInt, &["String"]));
+    variants.push(pure_variant(
+        LlhdPureOp::ConstTime,
+        &["String", "String", "i64", "i64"],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Alias,
+        &[LlhdSort::LlhdPureDfg.as_str()],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::ArrayUniform,
+        &["i64", LlhdSort::LlhdPureDfg.as_str()],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Not,
+        &[LlhdSort::LlhdPureDfg.as_str()],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Neg,
+        &[LlhdSort::LlhdPureDfg.as_str()],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Add,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Sub,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::And,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Or,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Xor,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Smul,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Sdiv,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Smod,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Srem,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Umul,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Udiv,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Umod,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Urem,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Eq,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Neq,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Slt,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Sgt,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Sle,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Sge,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Ult,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Ugt,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Ule,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Uge,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Shl,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Shr,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Mux,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Sig,
+        &[LlhdSort::LlhdPureDfg.as_str()],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::Prb,
+        &[LlhdSort::LlhdPureDfg.as_str()],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::InsField,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+            "i64",
+            "i64",
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::InsSlice,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+            "i64",
+            "i64",
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::ExtField,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+            "i64",
+            "i64",
+        ],
+    ));
+    variants.push(pure_variant(
+        LlhdPureOp::ExtSlice,
+        &[
+            LlhdSort::LlhdPureDfg.as_str(),
+            LlhdSort::LlhdPureDfg.as_str(),
+            "i64",
+            "i64",
+        ],
+    ));
+
+    commands.push(Command::Datatype {
+        span: span.clone(),
+        name: LlhdSort::LlhdPureDfg.to_string(),
+        variants,
+    });
+
+    commands.push(Command::Sort(
+        span.clone(),
+        LlhdSort::LlhdPureVec.to_string(),
+        Some((
+            "Vec".to_string(),
+            vec![expr_atom(LlhdSort::LlhdPureDfg.as_str())],
+        )),
+    ));
+    commands.push(Command::Constructor {
+        span: span.clone(),
+        name: LlhdPureOp::Array.to_string(),
+        schema: Schema::new(
+            vec![LlhdSort::LlhdPureVec.to_string()],
+            LlhdSort::LlhdPureDfg.to_string(),
+        ),
+        cost: None,
+        unextractable: false,
+    });
+    commands.push(Command::Constructor {
+        span: span.clone(),
+        name: LlhdPureOp::Struct.to_string(),
+        schema: Schema::new(
+            vec![LlhdSort::LlhdPureVec.to_string()],
+            LlhdSort::LlhdPureDfg.to_string(),
+        ),
+        cost: None,
+        unextractable: false,
+    });
+
+    commands.push(Command::Relation {
+        span: span.clone(),
+        name: LlhdPureOp::RootDfg.to_string(),
+        inputs: vec![LlhdSort::LlhdPureDfg.to_string()],
+    });
+    commands.push(Command::Relation {
+        span,
+        name: LlhdPureOp::PureDef.to_string(),
+        inputs: vec![
+            "i64".to_string(),
+            "i64".to_string(),
+            "i64".to_string(),
+            LlhdSort::LlhdTy.to_string(),
+            LlhdSort::LlhdPureDfg.to_string(),
+        ],
+    });
+    commands
+}
+
+fn pure_variant(name: LlhdPureOp, types: &[&str]) -> Variant {
+    Variant {
+        span: ::egglog::span!(),
+        name: name.to_string(),
+        types: types.iter().map(|ty| (*ty).to_string()).collect(),
+        cost: None,
+        unextractable: false,
+    }
+}
+
 const PURE_DFG_SCHEMA_PROGRAM: &str = concat!(
     "(sort LLHDTy)\n",
     "(sort LLHDVecTy (Vec LLHDTy))\n",
@@ -971,50 +1404,25 @@ const PURE_DFG_SCHEMA_PROGRAM: &str = concat!(
     "(constructor StructTy (LLHDVecTy) LLHDTy)\n",
     "(constructor FuncTy (LLHDVecTy LLHDTy) LLHDTy)\n",
     "(constructor EntityTy (LLHDVecTy LLHDVecTy) LLHDTy)\n",
-    "(datatype LLHDPureDFG\n",
-    "  (ValueRef i64)\n",
-    "  (ConstInt String)\n",
-    "  (ConstTime String String i64 i64)\n",
-    "  (Alias LLHDPureDFG)\n",
-    "  (ArrayUniform i64 LLHDPureDFG)\n",
-    "  (Not LLHDPureDFG)\n",
-    "  (Neg LLHDPureDFG)\n",
-    "  (Add LLHDPureDFG LLHDPureDFG)\n",
-    "  (Sub LLHDPureDFG LLHDPureDFG)\n",
-    "  (And LLHDPureDFG LLHDPureDFG)\n",
-    "  (Or LLHDPureDFG LLHDPureDFG)\n",
-    "  (Xor LLHDPureDFG LLHDPureDFG)\n",
-    "  (Smul LLHDPureDFG LLHDPureDFG)\n",
-    "  (Sdiv LLHDPureDFG LLHDPureDFG)\n",
-    "  (Smod LLHDPureDFG LLHDPureDFG)\n",
-    "  (Srem LLHDPureDFG LLHDPureDFG)\n",
-    "  (Umul LLHDPureDFG LLHDPureDFG)\n",
-    "  (Udiv LLHDPureDFG LLHDPureDFG)\n",
-    "  (Umod LLHDPureDFG LLHDPureDFG)\n",
-    "  (Urem LLHDPureDFG LLHDPureDFG)\n",
-    "  (Eq LLHDPureDFG LLHDPureDFG)\n",
-    "  (Neq LLHDPureDFG LLHDPureDFG)\n",
-    "  (Slt LLHDPureDFG LLHDPureDFG)\n",
-    "  (Sgt LLHDPureDFG LLHDPureDFG)\n",
-    "  (Sle LLHDPureDFG LLHDPureDFG)\n",
-    "  (Sge LLHDPureDFG LLHDPureDFG)\n",
-    "  (Ult LLHDPureDFG LLHDPureDFG)\n",
-    "  (Ugt LLHDPureDFG LLHDPureDFG)\n",
-    "  (Ule LLHDPureDFG LLHDPureDFG)\n",
-    "  (Uge LLHDPureDFG LLHDPureDFG)\n",
-    "  (Shl LLHDPureDFG LLHDPureDFG LLHDPureDFG)\n",
-    "  (Shr LLHDPureDFG LLHDPureDFG LLHDPureDFG)\n",
-    "  (Mux LLHDPureDFG LLHDPureDFG)\n",
-    "  (Sig LLHDPureDFG)\n",
-    "  (Prb LLHDPureDFG)\n",
-    "  (InsField LLHDPureDFG LLHDPureDFG i64 i64)\n",
-    "  (InsSlice LLHDPureDFG LLHDPureDFG i64 i64)\n",
-    "  (ExtField LLHDPureDFG LLHDPureDFG i64 i64)\n",
-    "  (ExtSlice LLHDPureDFG LLHDPureDFG i64 i64)\n",
-    ")\n",
+    "(datatype LLHDPureDFG (ValueRef i64) (ConstInt String) (ConstTime String String i64 i64) (Alias LLHDPureDFG) (ArrayUniform i64 LLHDPureDFG) (Not LLHDPureDFG) (Neg LLHDPureDFG) (Add LLHDPureDFG LLHDPureDFG) (Sub LLHDPureDFG LLHDPureDFG) (And LLHDPureDFG LLHDPureDFG) (Or LLHDPureDFG LLHDPureDFG) (Xor LLHDPureDFG LLHDPureDFG) (Smul LLHDPureDFG LLHDPureDFG) (Sdiv LLHDPureDFG LLHDPureDFG) (Smod LLHDPureDFG LLHDPureDFG) (Srem LLHDPureDFG LLHDPureDFG) (Umul LLHDPureDFG LLHDPureDFG) (Udiv LLHDPureDFG LLHDPureDFG) (Umod LLHDPureDFG LLHDPureDFG) (Urem LLHDPureDFG LLHDPureDFG) (Eq LLHDPureDFG LLHDPureDFG) (Neq LLHDPureDFG LLHDPureDFG) (Slt LLHDPureDFG LLHDPureDFG) (Sgt LLHDPureDFG LLHDPureDFG) (Sle LLHDPureDFG LLHDPureDFG) (Sge LLHDPureDFG LLHDPureDFG) (Ult LLHDPureDFG LLHDPureDFG) (Ugt LLHDPureDFG LLHDPureDFG) (Ule LLHDPureDFG LLHDPureDFG) (Uge LLHDPureDFG LLHDPureDFG) (Shl LLHDPureDFG LLHDPureDFG LLHDPureDFG) (Shr LLHDPureDFG LLHDPureDFG LLHDPureDFG) (Mux LLHDPureDFG LLHDPureDFG) (Sig LLHDPureDFG) (Prb LLHDPureDFG) (InsField LLHDPureDFG LLHDPureDFG i64 i64) (InsSlice LLHDPureDFG LLHDPureDFG i64 i64) (ExtField LLHDPureDFG LLHDPureDFG i64 i64) (ExtSlice LLHDPureDFG LLHDPureDFG i64 i64))\n",
     "(sort LLHDPureVec (Vec LLHDPureDFG))\n",
     "(constructor Array (LLHDPureVec) LLHDPureDFG)\n",
     "(constructor Struct (LLHDPureVec) LLHDPureDFG)\n",
     "(relation RootDFG (LLHDPureDFG))\n",
-    "(relation PureDef (i64 i64 i64 LLHDTy LLHDPureDFG))\n",
+    "(relation PureDef (i64 i64 i64 LLHDTy LLHDPureDFG))",
 );
+
+#[cfg(test)]
+fn render_pure_dfg_schema_program() -> String {
+    commands_to_string(&pure_dfg_schema_commands())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pure_dfg_schema_matches_reference() {
+        assert_eq!(render_pure_dfg_schema_program(), pure_dfg_schema_program());
+    }
+}

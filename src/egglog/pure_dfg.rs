@@ -1,4 +1,5 @@
 use super::ast as egg_ast;
+use super::terms::LlhdPureOp;
 use super::types::type_term;
 use crate::egraph::is_pure_opcode;
 use anyhow::Result;
@@ -46,7 +47,7 @@ pub(crate) fn append_pure_dfg_commands(unit: &Unit<'_>, commands: &mut Vec<Comma
             let ty = type_term(&unit.inst_type(inst));
             let expr = pure_dfg_expr_for_inst_with(unit, inst, data, value_ref_expr)?;
             commands.push(egg_ast::expr_command(egg_ast::expr_call(
-                "PureDef",
+                LlhdPureOp::PureDef.as_str(),
                 vec![inst_id, value_id, block_id, ty, expr],
             )));
         }
@@ -59,7 +60,7 @@ pub(crate) fn append_pure_dfg_commands(unit: &Unit<'_>, commands: &mut Vec<Comma
             value_ref_expr(value)
         };
         commands.push(egg_ast::expr_command(egg_ast::expr_call(
-            "RootDFG",
+            LlhdPureOp::RootDfg.as_str(),
             vec![expr],
         )));
     }
@@ -141,14 +142,14 @@ where
     let opcode = data.opcode();
     let expr = match data {
         InstData::ConstInt { imm, .. } => op_term(
-            "ConstInt",
+            LlhdPureOp::ConstInt,
             vec![egg_ast::expr_string(imm.value.to_string())],
         ),
         InstData::ConstTime { imm, .. } => {
             let num = imm.time.numer().clone();
             let den = imm.time.denom().clone();
             op_term(
-                "ConstTime",
+                LlhdPureOp::ConstTime,
                 vec![
                     egg_ast::expr_string(num.to_string()),
                     egg_ast::expr_string(den.to_string()),
@@ -161,27 +162,27 @@ where
             let len = imms.get(0).copied().unwrap_or(0);
             let arg = args.get(0).copied().unwrap_or_else(Value::invalid);
             op_term(
-                "ArrayUniform",
+                LlhdPureOp::ArrayUniform,
                 vec![egg_ast::expr_usize(len)?, arg_expr(arg)],
             )
         }
         InstData::Aggregate { args, .. } if opcode == Opcode::Array => {
             let elems = args.iter().map(|arg| arg_expr(*arg)).collect();
-            op_term("Array", vec![egg_ast::expr_list(elems)])
+            op_term(LlhdPureOp::Array, vec![egg_ast::expr_list(elems)])
         }
         InstData::Aggregate { args, .. } if opcode == Opcode::Struct => {
             let elems = args.iter().map(|arg| arg_expr(*arg)).collect();
-            op_term("Struct", vec![egg_ast::expr_list(elems)])
+            op_term(LlhdPureOp::Struct, vec![egg_ast::expr_list(elems)])
         }
         InstData::Unary { args, .. } => {
             let arg = args.get(0).copied().unwrap_or_else(Value::invalid);
             let arg = arg_expr(arg);
             match opcode {
-                Opcode::Alias => op_term("Alias", vec![arg]),
-                Opcode::Not => op_term("Not", vec![arg]),
-                Opcode::Neg => op_term("Neg", vec![arg]),
-                Opcode::Sig => op_term("Sig", vec![arg]),
-                Opcode::Prb => op_term("Prb", vec![arg]),
+                Opcode::Alias => op_term(LlhdPureOp::Alias, vec![arg]),
+                Opcode::Not => op_term(LlhdPureOp::Not, vec![arg]),
+                Opcode::Neg => op_term(LlhdPureOp::Neg, vec![arg]),
+                Opcode::Sig => op_term(LlhdPureOp::Sig, vec![arg]),
+                Opcode::Prb => op_term(LlhdPureOp::Prb, vec![arg]),
                 _ => value_ref_expr_for_inst(unit, inst),
             }
         }
@@ -191,30 +192,30 @@ where
             let lhs = arg_expr(lhs);
             let rhs = arg_expr(rhs);
             match opcode {
-                Opcode::Add => op_term("Add", vec![lhs, rhs]),
-                Opcode::Sub => op_term("Sub", vec![lhs, rhs]),
-                Opcode::And => op_term("And", vec![lhs, rhs]),
-                Opcode::Or => op_term("Or", vec![lhs, rhs]),
-                Opcode::Xor => op_term("Xor", vec![lhs, rhs]),
-                Opcode::Smul => op_term("Smul", vec![lhs, rhs]),
-                Opcode::Sdiv => op_term("Sdiv", vec![lhs, rhs]),
-                Opcode::Smod => op_term("Smod", vec![lhs, rhs]),
-                Opcode::Srem => op_term("Srem", vec![lhs, rhs]),
-                Opcode::Umul => op_term("Umul", vec![lhs, rhs]),
-                Opcode::Udiv => op_term("Udiv", vec![lhs, rhs]),
-                Opcode::Umod => op_term("Umod", vec![lhs, rhs]),
-                Opcode::Urem => op_term("Urem", vec![lhs, rhs]),
-                Opcode::Eq => op_term("Eq", vec![lhs, rhs]),
-                Opcode::Neq => op_term("Neq", vec![lhs, rhs]),
-                Opcode::Slt => op_term("Slt", vec![lhs, rhs]),
-                Opcode::Sgt => op_term("Sgt", vec![lhs, rhs]),
-                Opcode::Sle => op_term("Sle", vec![lhs, rhs]),
-                Opcode::Sge => op_term("Sge", vec![lhs, rhs]),
-                Opcode::Ult => op_term("Ult", vec![lhs, rhs]),
-                Opcode::Ugt => op_term("Ugt", vec![lhs, rhs]),
-                Opcode::Ule => op_term("Ule", vec![lhs, rhs]),
-                Opcode::Uge => op_term("Uge", vec![lhs, rhs]),
-                Opcode::Mux => op_term("Mux", vec![lhs, rhs]),
+                Opcode::Add => op_term(LlhdPureOp::Add, vec![lhs, rhs]),
+                Opcode::Sub => op_term(LlhdPureOp::Sub, vec![lhs, rhs]),
+                Opcode::And => op_term(LlhdPureOp::And, vec![lhs, rhs]),
+                Opcode::Or => op_term(LlhdPureOp::Or, vec![lhs, rhs]),
+                Opcode::Xor => op_term(LlhdPureOp::Xor, vec![lhs, rhs]),
+                Opcode::Smul => op_term(LlhdPureOp::Smul, vec![lhs, rhs]),
+                Opcode::Sdiv => op_term(LlhdPureOp::Sdiv, vec![lhs, rhs]),
+                Opcode::Smod => op_term(LlhdPureOp::Smod, vec![lhs, rhs]),
+                Opcode::Srem => op_term(LlhdPureOp::Srem, vec![lhs, rhs]),
+                Opcode::Umul => op_term(LlhdPureOp::Umul, vec![lhs, rhs]),
+                Opcode::Udiv => op_term(LlhdPureOp::Udiv, vec![lhs, rhs]),
+                Opcode::Umod => op_term(LlhdPureOp::Umod, vec![lhs, rhs]),
+                Opcode::Urem => op_term(LlhdPureOp::Urem, vec![lhs, rhs]),
+                Opcode::Eq => op_term(LlhdPureOp::Eq, vec![lhs, rhs]),
+                Opcode::Neq => op_term(LlhdPureOp::Neq, vec![lhs, rhs]),
+                Opcode::Slt => op_term(LlhdPureOp::Slt, vec![lhs, rhs]),
+                Opcode::Sgt => op_term(LlhdPureOp::Sgt, vec![lhs, rhs]),
+                Opcode::Sle => op_term(LlhdPureOp::Sle, vec![lhs, rhs]),
+                Opcode::Sge => op_term(LlhdPureOp::Sge, vec![lhs, rhs]),
+                Opcode::Ult => op_term(LlhdPureOp::Ult, vec![lhs, rhs]),
+                Opcode::Ugt => op_term(LlhdPureOp::Ugt, vec![lhs, rhs]),
+                Opcode::Ule => op_term(LlhdPureOp::Ule, vec![lhs, rhs]),
+                Opcode::Uge => op_term(LlhdPureOp::Uge, vec![lhs, rhs]),
+                Opcode::Mux => op_term(LlhdPureOp::Mux, vec![lhs, rhs]),
                 _ => value_ref_expr_for_inst(unit, inst),
             }
         }
@@ -226,8 +227,8 @@ where
             let b = arg_expr(b);
             let c = arg_expr(c);
             match opcode {
-                Opcode::Shl => op_term("Shl", vec![a, b, c]),
-                Opcode::Shr => op_term("Shr", vec![a, b, c]),
+                Opcode::Shl => op_term(LlhdPureOp::Shl, vec![a, b, c]),
+                Opcode::Shr => op_term(LlhdPureOp::Shr, vec![a, b, c]),
                 _ => value_ref_expr_for_inst(unit, inst),
             }
         }
@@ -246,10 +247,10 @@ where
             let imm0 = egg_ast::expr_usize(imm0)?;
             let imm1 = egg_ast::expr_usize(imm1)?;
             match opcode {
-                Opcode::InsField => op_term("InsField", vec![a, b, imm0, imm1]),
-                Opcode::InsSlice => op_term("InsSlice", vec![a, b, imm0, imm1]),
-                Opcode::ExtField => op_term("ExtField", vec![a, b, imm0, imm1]),
-                Opcode::ExtSlice => op_term("ExtSlice", vec![a, b, imm0, imm1]),
+                Opcode::InsField => op_term(LlhdPureOp::InsField, vec![a, b, imm0, imm1]),
+                Opcode::InsSlice => op_term(LlhdPureOp::InsSlice, vec![a, b, imm0, imm1]),
+                Opcode::ExtField => op_term(LlhdPureOp::ExtField, vec![a, b, imm0, imm1]),
+                Opcode::ExtSlice => op_term(LlhdPureOp::ExtSlice, vec![a, b, imm0, imm1]),
                 _ => value_ref_expr_for_inst(unit, inst),
             }
         }
@@ -275,9 +276,12 @@ fn value_ref_or_var(value: Value, pure_set: &HashMap<Value, ()>) -> Expr {
 
 fn value_ref_expr(value: Value) -> Expr {
     if value.is_invalid() {
-        op_term("ValueRef", vec![egg_ast::expr_i64(-1)])
+        op_term(LlhdPureOp::ValueRef, vec![egg_ast::expr_i64(-1)])
     } else {
-        op_term("ValueRef", vec![egg_ast::expr_i64(value.index() as i64)])
+        op_term(
+            LlhdPureOp::ValueRef,
+            vec![egg_ast::expr_i64(value.index() as i64)],
+        )
     }
 }
 
@@ -295,8 +299,8 @@ fn def_inst(unit: &Unit<'_>, value: Value) -> Option<Inst> {
     }
 }
 
-fn op_term(name: &str, args: Vec<Expr>) -> Expr {
-    egg_ast::expr_call(name, args)
+fn op_term(name: LlhdPureOp, args: Vec<Expr>) -> Expr {
+    egg_ast::expr_call(name.as_str(), args)
 }
 
 fn collect_inst_blocks(unit: &Unit<'_>) -> HashMap<Inst, usize> {

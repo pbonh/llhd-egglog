@@ -16,6 +16,7 @@ egglog-numeric-id = { git = "https://github.com/egraphs-good/egglog", package = 
 llhd = { git = "https://github.com/fabianschuiki/llhd", branch = "master" }
 log = "0.4"
 num = { version = "0.3", features = ["serde"] }
+typed-builder = "0.20"
 
 [features]
 egglog-debug = []

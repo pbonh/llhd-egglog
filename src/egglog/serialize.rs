@@ -2,6 +2,7 @@ use super::ast::{
     expr_atom, expr_call, expr_command, expr_i64, expr_list, expr_string, expr_usize,
 };
 use super::names::{opcode_atom, reg_mode_atom, unit_kind_atom, unit_name_terms};
+use super::program::LlhdEgglogProgram;
 use super::pure_dfg::append_pure_dfg_commands;
 use super::types::{type_term, types_list};
 use crate::cfg::{CfgSkeleton, SkeletonStmt, SkeletonTerminator};
@@ -376,11 +377,10 @@ pub fn unit_to_egglog_commands(unit: &Unit<'_>) -> Result<Vec<Command>> {
 /// Serialize a unit into an egglog-style program.
 pub fn unit_to_egglog_program(unit: &Unit<'_>) -> Result<String> {
     let commands = unit_to_egglog_commands(unit)?;
-    Ok(commands
-        .iter()
-        .map(|cmd| cmd.to_string())
-        .collect::<Vec<_>>()
-        .join("\n"))
+    Ok(LlhdEgglogProgram::builder()
+        .facts(commands)
+        .build()
+        .to_string())
 }
 
 fn values_list(values: Vec<::egglog::ast::Expr>) -> ::egglog::ast::Expr {

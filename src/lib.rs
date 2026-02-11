@@ -8,7 +8,7 @@ mod schema;
 pub use crate::cfg::{BlockArg, CfgSkeleton, SkeletonBlock, SkeletonStmt, SkeletonTerminator};
 pub use crate::egglog::{
     unit_from_egglog_commands, unit_from_egglog_program, unit_to_egglog_commands,
-    unit_to_egglog_program,
+    unit_to_egglog_program, LlhdEgglogProgram, LlhdPureOp, LlhdSort,
 };
 pub use crate::egraph::{is_pure_opcode, EClassRef, UnitEGraph};
 pub use crate::schema::{

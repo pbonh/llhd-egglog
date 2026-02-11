@@ -1,8 +1,9 @@
 use super::VecValue;
-use egglog_bridge::{ColumnTy, DefaultVal, EGraph, FunctionConfig, FunctionId, MergeFn};
-
+use crate::egglog::ast::{expr_atom, expr_call};
 #[cfg(test)]
-use std::fmt::Write;
+use crate::egglog::program::commands_to_string;
+use egglog::ast::{Command, RustSpan, Span};
+use egglog_bridge::{ColumnTy, DefaultVal, EGraph, FunctionConfig, FunctionId, MergeFn};
 
 /// Egglog table ids for the LLHD CFG skeleton schema.
 #[derive(Debug, Clone)]
@@ -84,7 +85,6 @@ enum CfgColumnTy {
 }
 
 impl CfgColumnTy {
-    #[cfg(test)]
     fn as_str(self) -> &'static str {
         match self {
             Self::Id => "Id",
@@ -127,6 +127,21 @@ pub const CFG_SK_TERM_RET: &str = "SkTermRet";
 pub const CFG_SK_TERM_RET_VALUE: &str = "SkTermRetValue";
 /// Table name for CFG skeleton halt terminators.
 pub const CFG_SK_TERM_HALT: &str = "SkTermHalt";
+
+/// Reference CFG schema as command list.
+pub fn cfg_schema_commands() -> Vec<Command> {
+    CFG_TABLES
+        .iter()
+        .map(|table| {
+            let mut args = Vec::with_capacity(table.columns.len() + 1);
+            args.push(expr_atom(table.name));
+            for column in table.columns {
+                args.push(expr_call(column.name, vec![expr_atom(column.ty.as_str())]));
+            }
+            Command::UserDefined(::egglog::span!(), "table".to_string(), args)
+        })
+        .collect()
+}
 
 const CFG_SK_BLOCK_COLUMNS: &[CfgColumn] = &[CfgColumn {
     name: "block",
@@ -358,20 +373,12 @@ const CFG_SCHEMA_PROGRAM: &str = concat!(
     "(table SkTermWaitTime (block i64) (inst i64) (time Id) (target i64) (args VecValue))\n",
     "(table SkTermRet (block i64) (inst i64))\n",
     "(table SkTermRetValue (block i64) (inst i64) (value Id))\n",
-    "(table SkTermHalt (block i64) (inst i64))\n",
+    "(table SkTermHalt (block i64) (inst i64))",
 );
 
 #[cfg(test)]
 fn render_cfg_schema_program() -> String {
-    let mut out = String::new();
-    for table in CFG_TABLES {
-        let _ = write!(out, "(table {}", table.name);
-        for column in table.columns {
-            let _ = write!(out, " ({} {})", column.name, column.ty.as_str());
-        }
-        out.push_str(")\n");
-    }
-    out
+    commands_to_string(&cfg_schema_commands())
 }
 
 #[cfg(test)]
